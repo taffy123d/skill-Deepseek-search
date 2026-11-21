@@ -200,6 +200,8 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 
 全部写在 `<skill>/.cache/deep-think/`：`history.json`（多轮状态，原样保留 `kind`/`signature`/`server_tool_calls`）、`deep-think.log.jsonl`（每次一行 usage 与耗时）、`raw/`（`--dump-raw` 的原始响应）。目录不可写直接报错，不回退到系统临时目录。
 
+状态文件与协议绑定：`--protocol chat` 写的状态不能拿去跑 `--protocol responses`（本地直接报错 `exit 1`，不会发请求白花 token）。
+
 ## 缓存
 
 - 位置：`<skill>/.cache/fetch/`，文件名 = `sha256(url)[:20].json`，内容 `{fetched_at, url, title, content}`
@@ -231,7 +233,7 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 
 ```bash
 python3 scripts/selftest.py             # 95 个离线用例：去重/过滤/排序/截断/摘录/缓存/重试
-python3 scripts/selftest_deep_think.py  # 65 个离线用例：三协议解析/流式累积/视图/请求体/错误映射/状态往返
+python3 scripts/selftest_deep_think.py  # 68 个离线用例：三协议解析/流式累积/视图/请求体/错误映射/状态往返
 ```
 
 ## 说明

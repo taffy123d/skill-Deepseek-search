@@ -925,17 +925,53 @@ class TestArtifacts(unittest.TestCase):
         result = dt.parse_messages(MESSAGES_RESPONSE)
         items = [{"role": "user", "content": "问题"}, result.raw_assistant]
         dt.save_history(path, "messages", "deepseek-flash", items)
-        loaded = dt.load_history(path)
+        loaded, meta = dt.load_history(path)
+        self.assertEqual(meta["protocol"], "messages")
         self.assertEqual(loaded[1]["content"][6]["signature"], "tQU8k+8Ko7MY5XDAvJd0...")
+
+    def test_responses_history_is_flat(self):
+        # responses 的 raw_assistant 是 output item 列表，写回历史时必须逐个展开
+        path = os.path.join(self.tmp, "history.json")
+        result = dt.parse_responses(RESPONSES_RESPONSE)
+        saved = [{"role": "user", "content": "问题"}]
+        saved.extend(result.raw_assistant)
+        dt.save_history(path, "responses", "deepseek-flash", saved)
+        loaded, _meta = dt.load_history(path)
+        self.assertTrue(all(isinstance(item, dict) for item in loaded))
+        self.assertEqual(
+            [item.get("type") for item in loaded[1:]],
+            ["reasoning", "web_search_call", "web_search_call", "message"],
+        )
+
+    def test_history_flattens_legacy_nested_array(self):
+        # 旧版本把 responses 的 output items 塞成一个嵌套数组，读的时候要展平
+        path = os.path.join(self.tmp, "history.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "protocol": "responses",
+                    "items": [
+                        {"role": "user", "content": "问题"},
+                        [{"type": "message", "role": "assistant", "content": []}, "junk"],
+                    ],
+                },
+                fh,
+            )
+        loaded, meta = dt.load_history(path)
+        self.assertEqual(meta["protocol"], "responses")
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(loaded[1]["type"], "message")
 
     def test_history_accepts_plain_array(self):
         path = os.path.join(self.tmp, "history.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump([{"role": "user", "content": "hi"}], fh)
-        self.assertEqual(dt.load_history(path), [{"role": "user", "content": "hi"}])
+        loaded, meta = dt.load_history(path)
+        self.assertEqual(loaded, [{"role": "user", "content": "hi"}])
+        self.assertEqual(meta, {})
 
     def test_history_missing_file_is_empty(self):
-        self.assertEqual(dt.load_history(os.path.join(self.tmp, "nope.json")), [])
+        self.assertEqual(dt.load_history(os.path.join(self.tmp, "nope.json")), ([], {}))
 
     def test_build_items_appends_question(self):
         items = dt.build_items([{"role": "user", "content": "上一轮"}], "本轮", "responses")
@@ -994,6 +1030,21 @@ class TestCli(unittest.TestCase):
             if env_file is not None:
                 os.environ["DEEPSEEK_API_KEY_FILE"] = env_file
         self.assertEqual(code, dt.EXIT_USAGE)
+
+    def test_cross_protocol_history_rejected(self):
+        # 状态文件与协议绑定：跨协议回传在服务端必然 422，本地直接拒绝
+        tmp = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmp, "h.json")
+            dt.save_history(path, "messages", "deepseek-flash", [{"role": "user", "content": "q"}])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                code = dt.main(["问题", "--protocol", "chat", "--history", path, "--dry-run"])
+            self.assertEqual(code, dt.EXIT_USAGE)
+            self.assertIn("状态文件与协议绑定", stderr.getvalue())
+        finally:
+            os.unlink(path)
+            os.rmdir(tmp)
 
 
 if __name__ == "__main__":

@@ -1166,18 +1166,31 @@ def print_human(view, result, args):
 # 历史状态（skill 私有，不是给 agent 的返回值）
 # --------------------------------------------------------------------------- #
 def load_history(path):
+    """读历史状态，返回 (items, meta)。
+
+    兼容三种形态：纯数组、{"items": [...]}、{"messages": [...]}；
+    旧版本可能写出嵌套数组，这里顺便展平一层并丢弃非对象元素。
+    """
     if not path or not os.path.isfile(path):
-        return []
+        return [], {}
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError) as exc:
         raise ConfigError("无法读取历史文件 %s：%s" % (path, exc))
+    meta = {}
     if isinstance(data, dict):
+        meta = {"protocol": data.get("protocol"), "model": data.get("model")}
         data = data.get("items") or data.get("messages") or []
     if not isinstance(data, list):
         raise ConfigError("历史文件格式不对（应为消息数组或 {\"items\": [...]}）：%s" % path)
-    return data
+    items = []
+    for item in data:
+        if isinstance(item, list):
+            items.extend([sub for sub in item if isinstance(sub, dict)])
+        elif isinstance(item, dict):
+            items.append(item)
+    return items, meta
 
 
 def save_history(path, protocol, model, items):
@@ -1258,7 +1271,13 @@ def run(args):
     if args.dump_raw:
         raw_path = artifact_path(args.dump_raw, os.path.join(DEFAULT_RAW_DIR, time.strftime("%Y%m%d-%H%M%S") + ".json"))
 
-    history = load_history(history_path) if history_path else []
+    history, history_meta = load_history(history_path) if history_path else ([], {})
+    if history_meta.get("protocol") and history_meta["protocol"] != args.protocol:
+        # 跨协议回传在服务端必然 422（如 messages 的 thinking 块），直接拒绝以免白花 token
+        raise UsageError(
+            "历史状态是 %s 协议写的，当前 --protocol 是 %s：状态文件与协议绑定，"
+            "请用同一协议继续（或换一个新的状态文件）" % (history_meta["protocol"], args.protocol)
+        )
     items = build_items(history, question, args.protocol)
     payload = build_payload(args.protocol, args.model, items, args.stream, args.max_tokens)
     url = API_BASE + PROTOCOLS[args.protocol]
@@ -1321,8 +1340,12 @@ def run(args):
 
     if save_path:
         saved = list(items)
-        if result.raw_assistant:
-            saved.append(result.raw_assistant)
+        raw = result.raw_assistant
+        if isinstance(raw, list):
+            # responses 协议的 output items 要逐个放回 input，不能塞成一个嵌套数组
+            saved.extend([item for item in raw if isinstance(item, dict)])
+        elif raw:
+            saved.append(raw)
         save_history(save_path, args.protocol, args.model, saved)
 
     finish = (result.finish_reason or "").lower()

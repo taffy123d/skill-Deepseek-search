@@ -108,6 +108,7 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
 `--history` / `--save-history` 指向**同一个 skill 私有状态文件**（默认 `.cache/deep-think/history.json`），脚本负责原样回传上一轮的协议字段（`server_tool_calls` / `kind` / `signature`）。**你不需要、也不应该**把这些字段搬进上下文。
 
 - 上一轮用过联网工具的回复**不能续写**，中断就重发原始请求。
+- 状态文件与协议绑定：`chat` 写的状态不能拿去跑 `--protocol responses`（脚本直接报错拒绝，不会发起请求白花 token）。
 - 没有有效 `signature` 时，之前读过的网页不会拼回上下文（回答正文仍在）。
 - 只想问一个新问题，就别带 `--history`。
 
