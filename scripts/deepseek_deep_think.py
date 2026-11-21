@@ -1160,7 +1160,8 @@ def build_view(result, args):
 # 输出
 # --------------------------------------------------------------------------- #
 def print_human(view, result, args):
-    if not args.brief:
+    # 默认视图只有 answer + citations；状态行只在 --summary / --verbose 时出现
+    if args.summary or args.verbose:
         sys.stdout.write("[deep-think] %s · %s · %s\n\n" % (args.protocol, args.model, result.finish_reason or "-"))
     sys.stdout.write(view.get("answer") or "（模型未返回正文）")
     sys.stdout.write("\n")
@@ -1356,7 +1357,7 @@ def run(args):
             },
         )
 
-    if result.usage:
+    if result.usage and (args.summary or args.verbose):
         note(usage_line(result.usage))
 
     if result.error:

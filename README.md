@@ -190,11 +190,11 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 
 | 视图 | 触发 | 返回 |
 | --- | --- | --- |
-| 默认 | 常规调用 | `answer` + `citations`（url + title，去重、标题截断、默认 ≤8 条） |
-| 带摘要 | `--summary` | 再加 `trace_summary`（如「搜索3次，打开2页」） |
-| 诊断 | `--verbose` | 再加 `thinking_digest`（每步结论句）与 `tool_trace`（action + query/url/pattern） |
+| 默认 | 常规调用 | `answer` + `citations`（url + title，去重、标题截断、默认 ≤8 条）；**无状态行、无 usage** |
+| 带摘要 | `--summary` | 再加 `trace_summary`（如「搜索3次，打开2页」），并在 stderr 打印 usage |
+| 诊断 | `--verbose` | 再加 `thinking_digest`（每步结论句）与 `tool_trace`（action + query/url/pattern），同样打印 usage |
 
-不返回：`signature`、`encrypted_content`、`cited_text`、`encrypted_index`、`snippet`、`site_*`、`page.*`、`published_at`、`server_tool_calls` 原文。`usage` 只写 stderr。
+不返回：`signature`、`encrypted_content`、`cited_text`、`encrypted_index`、`snippet`、`site_*`、`page.*`、`published_at`、`server_tool_calls` 原文。`usage` 默认不输出，仅 `--summary` / `--verbose` 打到 stderr，或 `--log` 落盘。
 
 ### 请求约束（脚本已固化）
 

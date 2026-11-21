@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -1095,6 +1096,116 @@ class TestCli(unittest.TestCase):
         finally:
             os.unlink(path)
             os.rmdir(tmp)
+
+
+class TestDefaultViewIsSilent(unittest.TestCase):
+    """默认视图只返回 answer + citations，不得带任何诊断信息（stdout 与 stderr 都算）。"""
+
+    RESP = {
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "答案正文。",
+                    "reasoning_content": "先想想。",
+                    "annotations": [
+                        {"type": "url_citation", "url_citation": {"url": "https://e.com/a", "title": "A"}}
+                    ],
+                    "server_tool_calls": [
+                        {
+                            "index": 0,
+                            "reasoning_content": "先查一下。",
+                            "calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c1",
+                                    "kind": "deep_search",
+                                    "action": {"type": "search", "queries": ["q"]},
+                                    "status": "completed",
+                                    "sources": [{"type": "url", "url": "https://e.com/a"}],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "completion_tokens_details": {"reasoning_tokens": 20},
+            "server_tool_use": {"tool_search": 1, "tool_fetch": 0, "tool_image_search": 0},
+        },
+    }
+
+    def call(self, argv, response=None):
+        out, errbuf = io.StringIO(), io.StringIO()
+        payload = response if response is not None else self.RESP
+        with mock.patch.object(dt, "post_json", lambda *a, **k: payload), mock.patch.object(
+            dt, "resolve_key", lambda *a, **k: "KEY"
+        ):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errbuf):
+                code = dt.main(argv)
+        return code, out.getvalue(), errbuf.getvalue()
+
+    def test_default_human_output_has_no_diagnostics(self):
+        code, out, errbuf = self.call(["问题"])
+        self.assertEqual(code, dt.EXIT_OK)
+        self.assertEqual(errbuf, "")  # 默认不打印 usage
+        self.assertNotIn("[deep-think]", out)  # 无状态行
+        self.assertNotIn("usage:", out)
+        self.assertNotIn("检索轨迹", out)
+        self.assertNotIn("思考摘要", out)
+        self.assertNotIn("工具轨迹", out)
+        self.assertEqual(out, "答案正文。\n\n引用 (1):\n[1] A — https://e.com/a\n")
+
+    def test_default_json_output_has_no_diagnostics(self):
+        code, out, errbuf = self.call(["问题", "--json"])
+        self.assertEqual(code, dt.EXIT_OK)
+        self.assertEqual(errbuf, "")
+        self.assertEqual(json.loads(out), {"answer": "答案正文。", "citations": [{"url": "https://e.com/a", "title": "A"}]})
+
+    def test_summary_adds_trace_and_usage(self):
+        code, out, errbuf = self.call(["问题", "--summary"])
+        self.assertEqual(code, dt.EXIT_OK)
+        self.assertIn("检索轨迹", out)
+        self.assertIn("[deep-think]", out)
+        self.assertIn("usage:", errbuf)
+
+    def test_verbose_adds_diagnostics(self):
+        code, out, errbuf = self.call(["问题", "--verbose"])
+        self.assertEqual(code, dt.EXIT_OK)
+        self.assertIn("思考摘要", out)
+        self.assertIn("工具轨迹", out)
+        self.assertIn("usage:", errbuf)
+
+    def test_brief_has_no_header(self):
+        code, out, _ = self.call(["问题", "--brief"])
+        self.assertEqual(code, dt.EXIT_OK)
+        self.assertEqual(out, "答案正文。\n")
+
+    def test_log_writes_file_without_stderr_noise(self):
+        path = os.path.join(dt.SKILL_ROOT, ".cache", "deep-think", "selftest-log.jsonl")
+        try:
+            code, _out, errbuf = self.call(["问题", "--log", path])
+            self.assertEqual(code, dt.EXIT_OK)
+            self.assertNotIn("usage:", errbuf)
+            with open(path, "r", encoding="utf-8") as fh:
+                record = json.loads(fh.read().strip().split("\n")[-1])
+            self.assertEqual(record["usage"]["input"], 1000)
+        finally:
+            if os.path.isfile(path):
+                os.unlink(path)
+
+    def test_abnormal_finish_still_warns(self):
+        payload = json.loads(json.dumps(self.RESP))
+        payload["choices"][0]["finish_reason"] = "content_filter"
+        payload["choices"][0]["message"]["content"] = ""
+        code, _out, errbuf = self.call(["问题"], response=payload)
+        self.assertEqual(code, dt.EXIT_API)
+        self.assertIn("内容审核", errbuf)
 
 
 if __name__ == "__main__":

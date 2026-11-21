@@ -102,7 +102,8 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
 ```
 
 - `answer` 与 `citations` 是**你唯一需要消费的内容**；`citations` 只有 url + title，**不带正文**，要原文再 `fetch` 那个 URL。
-- 思考文本、工具轨迹、`signature`、`cited_text`、`snippet` 不在默认返回值里；`--brief` 只输出正文；`usage` 只写 stderr。
+- 默认**只返回** `answer` + `citations`：没有状态行、没有 `usage`、没有思考/轨迹/`signature`/`cited_text`/`snippet`。
+- `usage` 仅在 `--summary` / `--verbose` 时打到 stderr，或 `--log` 落盘；`--brief` 只输出正文。
 - `--summary` 追加一行 `trace_summary`（如「搜索3次，打开2页」），只用来判断检索量是否异常，**不要在下轮复述**。
 - `--verbose` 是诊断视图：**不要回传进后续上下文**，要留档自己落盘。
 
