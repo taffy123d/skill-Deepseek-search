@@ -147,7 +147,7 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
 - **不省钱**：`--brief` / `--max-answer-chars` / 视图裁剪只省你的上下文，billing 是模型生成量。
 - **步数是最强乘数**：上限约 20 步且不可参数化；模糊问题别进 deep-think（典型 ¥0.01/次，最坏 ¥0.1+）。失败只降级一次 `search`，不重试 deep-think。
 
-选型：已知 URL → `fetch`；摸底找链接 → `search`；单点事实要引用 → `deep-think --effort low`；多跳/交叉验证 → `deep-think`。价格表与实测账本见 README。
+选型：已知 URL → `fetch`；摸底找链接 → `search`；单点事实要引用 → `deep-think --effort low`；多跳/交叉验证 → `deep-think`。
 
 ## 产物位置
 
@@ -157,3 +157,4 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
 
 - 联网工具（服务端搜索/深度思考搜索）：https://api-docs.deepseek.com/zh-cn/guides/web_tools
 - 网页搜索与抓取：https://api-docs.deepseek.com/zh-cn/guides/search
+
