@@ -33,7 +33,8 @@ bash scripts/deepseek-search.sh search "<关键词>" \
 
 ### 步骤 2：读结果（不花钱）
 
-每条含：标题、URL、来源/日期、`score`（rerank_score）、`authority`、`Summary`（长摘要，专门给模型读，默认不截断）。
+每条含：标题行 `[1] 标题  (站点 · 日期 · 分数 · authN)`、URL 行、摘要正文（长摘要，专门给模型读，默认不截断；已去噪、URL 已去掉跟踪参数）。
+需要四行完整标签时加 `--full-meta`。
 
 判断规则：
 - `score ≥ 1.5` 为优质；`authority ≥ 3` 为极权威（政府/官媒/官方文档）。
@@ -46,7 +47,7 @@ bash scripts/deepseek-search.sh search "<关键词>" \
 bash scripts/deepseek-search.sh fetch "<URL1>" "<URL2>" --max-chars 8000 --keywords "<关键词1,关键词2>"
 ```
 
-- 一轮最多 3 个 URL，挑最可能含细节的链接；禁止抓无关链接。
+- 一轮最多 3 个 URL（脚本默认 `--max-urls 3` 会硬拦），挑最可能含细节的链接；禁止抓无关链接。
 - `--max-chars` 为单篇上限（默认 10000），超长会追加 `[…已截断，原文 N 字符…]` 标记；上下文紧张时用 `--keywords` 只摘录命中段落（含前后各 1 段）。
 - 多 URL 时单篇失败不中断（stderr 提示，末尾 exit 3）；需要失败即停用 `--fail-fast`。
 

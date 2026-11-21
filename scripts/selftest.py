@@ -66,6 +66,19 @@ class TestUrlNormalization(unittest.TestCase):
         items = [make_item("https://a.com/zh-cn/x"), make_item("https://a.com/en/x")]
         self.assertEqual(len(ds.dedupe_results(items)), 1)
 
+    def test_display_url_drops_empty_and_tracking_params(self):
+        self.assertEqual(
+            ds.display_url("https://a.com/x?referFrom=&wid=1&upstream_biz=tt&id=9"),
+            "https://a.com/x?wid=1&id=9",
+        )
+
+    def test_display_url_keeps_locale(self):
+        self.assertEqual(
+            ds.display_url("https://a.com/zh-cn/x/?utm_source=1&id=2#f"),
+            "https://a.com/zh-cn/x?id=2",
+        )
+        self.assertEqual(ds.display_url(""), "")
+
     def test_empty(self):
         self.assertEqual(ds.normalize_url(""), "")
 
@@ -200,6 +213,83 @@ class TestCache(unittest.TestCase):
         self.assertIsNone(ds.cache_read(broken, 60))
 
 
+class TestTitleCleaning(unittest.TestCase):
+    def test_collapses_self_duplicated_title(self):
+        self.assertEqual(ds.clean_title("A - A"), "A")
+        self.assertEqual(ds.clean_title("A | B | A"), "A | B | A")
+        self.assertEqual(ds.clean_title("DeepSeek V4 - DeepSeek V4"), "DeepSeek V4")
+
+    def test_keeps_normal_titles(self):
+        self.assertEqual(ds.clean_title("标题 - 站点"), "标题 - 站点")
+        self.assertEqual(ds.clean_title("  多个   空格  "), "多个 空格")
+        self.assertEqual(ds.clean_title(None), "")
+
+
+class TestSummaryCleaning(unittest.TestCase):
+    def test_strips_html_tags_and_br_to_newline(self):
+        out = ds.clean_summary("<strong>Agent</strong> 能力<br>提升")
+        self.assertEqual(out, "Agent 能力\n提升")
+
+    def test_strips_leading_heading_duplicating_title(self):
+        self.assertEqual(ds.clean_summary("# 模型 & 价格\n\n正文", "模型 & 价格"), "正文")
+
+    def test_strips_markdown_emphasis_and_collapses_blank_lines(self):
+        self.assertEqual(ds.clean_summary("**重点**\n\n\n\n后续"), "重点\n\n后续")
+
+    def test_keeps_tables_and_ellipsis(self):
+        text = "模型 | 价格\n...\n- 另一行"
+        self.assertEqual(ds.clean_summary(text), text)
+
+    def test_drops_short_boilerplate_lines_only(self):
+        text = "2026-04-24 12:23 发布于：上海市\n来源：凤凰网\n正文第一段\n责任编辑：张三"
+        self.assertEqual(ds.clean_summary(text), "正文第一段")
+        # 长句虽以“来源：”开头，但不像样板行，必须保留
+        long_line = "来源：国家统计局数据显示，2025 年第一季度同比增长 5.4%，高于市场预期。"
+        self.assertEqual(ds.clean_summary(long_line), long_line)
+
+    def test_empty(self):
+        self.assertEqual(ds.clean_summary(None), "")
+        self.assertEqual(ds.clean_summary("   "), "")
+
+    def test_json_output_is_cleaned_but_raw_is_not(self):
+        item = make_item("https://a.com/1", summary="<strong>重点</strong> 正文")
+        code, out, _, _ = run_cli(["search", "q", "--json"], search_payload(item))
+        self.assertEqual(json.loads(out)["results"][0]["summary"], "重点 正文")
+        code, out, _, _ = run_cli(["search", "q", "--raw"], search_payload(item))
+        self.assertEqual(json.loads(out)["results"][0]["summary"], "<strong>重点</strong> 正文")
+
+
+class TestMaxUrls(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ds-maxurls-")
+        self.base = ["fetch", "--cache-dir", self.dir, "--delay", "0"]
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_default_limit_is_three(self):
+        payload = {"title": "t", "content": "c"}
+        code, _, _, calls = run_cli(self.base + ["https://a.com/%d" % i for i in range(4)], payload)
+        self.assertEqual(code, "raised:UsageError")
+        self.assertEqual(calls, [])
+
+    def test_can_raise_limit(self):
+        payload = {"title": "t", "content": "c"}
+        code, _, _, calls = run_cli(
+            self.base + ["https://a.com/%d" % i for i in range(4)] + ["--max-urls", "4"], payload
+        )
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertEqual(len(calls), 4)
+
+    def test_zero_means_unlimited(self):
+        payload = {"title": "t", "content": "c"}
+        code, _, _, calls = run_cli(
+            self.base + ["https://a.com/%d" % i for i in range(5)] + ["--max-urls", "0"], payload
+        )
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertEqual(len(calls), 5)
+
+
 class TestCacheLocation(unittest.TestCase):
     def test_default_dir_is_inside_skill(self):
         prev = os.environ.pop("DEEPSEEK_SEARCH_CACHE", None)
@@ -288,15 +378,34 @@ class TestRetry(unittest.TestCase):
 
 
 class TestFormatting(unittest.TestCase):
-    def test_search_text_has_core_fields_and_no_icon(self):
+    def test_compact_format_keeps_fields_and_drops_labels(self):
         text = ds.format_search_text([make_item("https://a.com/1", score=2.4, authority=3)], 800, 0)
-        self.assertIn("[1] t:https://a.com/1", text)
-        self.assertIn("URL:       https://a.com/1", text)
-        self.assertIn("score: 2.4", text)
-        self.assertIn("authority: 3", text)
-        self.assertIn("date: 2025-06-01", text)
-        self.assertNotIn("favicon", text)
+        self.assertIn("[1] t:https://a.com/1  (site · 2025-06-01 · 2.40 · auth3)", text)
+        self.assertIn("https://a.com/1", text)
+        self.assertNotIn("Summary:", text)  # 默认不再有标签
         self.assertNotIn("Icon:", text)
+        self.assertNotIn("favicon", text)
+
+    def test_output_url_strips_tracking_params(self):
+        item = make_item("https://a.com/p?id=3&utm_source=tg&spm=x", title="正常标题")
+        text = ds.format_search_text([item], 800, 0)
+        self.assertIn("https://a.com/p?id=3", text)
+        self.assertNotIn("utm_source", text)
+
+    def test_compact_omits_missing_meta(self):
+        item = make_item("https://a.com/1")
+        item.update({"site_name": None, "date": None, "authority": None, "rerank_score": 1.2})
+        text = ds.format_search_text([item], 800, 0)
+        self.assertIn("(1.20)", text)
+        self.assertNotIn("unknown", text)
+
+    def test_full_meta_format(self):
+        text = ds.format_search_text(
+            [make_item("https://a.com/1", score=2.4, authority=3)], 800, 0, compact=False
+        )
+        self.assertIn("URL:       https://a.com/1", text)
+        self.assertIn("Source:    site  |  date: 2025-06-01", text)
+        self.assertIn("Summary:   ", text)
 
     def test_summary_truncation(self):
         text = ds.format_search_text([make_item("https://a.com/1", summary="z" * 900)], 100, 0)
@@ -396,9 +505,17 @@ class TestRunSearchFlow(unittest.TestCase):
         code, out, _, _ = run_cli(["search", "q", "--raw", "--min-score", "1.5"], payload)
         self.assertEqual(json.loads(out), payload)
 
-    def test_need_content_prints_content_block(self):
+    def test_need_content_prints_content_block_compact(self):
         payload = search_payload(make_item("https://a.com/1", content="正文片段"))
         code, out, _, _ = run_cli(["search", "q", "--need-content", "--max-content", "10"], payload)
+        self.assertIn("[Content]", out)
+        self.assertIn("正文片段", out)
+
+    def test_need_content_full_meta(self):
+        payload = search_payload(make_item("https://a.com/1", content="正文片段"))
+        code, out, _, _ = run_cli(
+            ["search", "q", "--need-content", "--max-content", "10", "--full-meta"], payload
+        )
         self.assertIn("Content:   正文片段", out)
 
     def test_sends_need_content_false_by_default(self):

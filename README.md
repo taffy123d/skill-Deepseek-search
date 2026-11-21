@@ -66,6 +66,7 @@ bash scripts/deepseek-search.sh --help
 | `--no-dedupe` | 关闭 URL 去重（默认去重：忽略 fragment、尾斜杠、`utm_*` 等跟踪参数） |
 | `--max-summary N` | 每条摘要字符上限（默认 800，覆盖官方摘要长度，不再截到 400） |
 | `--max-content N` | `--need-content` 时正文上限（默认 1500；0 = 不显示） |
+| `--full-meta` | 输出四行完整标签（默认精简：标题行带 `(站点 · 日期 · 分数 · authN)`） |
 
 过滤后为空会自动回退为不过滤（stderr 告警），不会给你一个空列表。
 
@@ -76,12 +77,23 @@ bash scripts/deepseek-search.sh --help
 | `--max-chars N` | 单篇正文上限，默认 10000；超出追加 `[…已截断，原文 N 字符…]` |
 | `--keywords "a,b"` | 段落级关键词摘录（保留命中段 + 前后各 `--keyword-pad` 段，默认 1） |
 | `--delay 0.2` | 多 URL 之间的请求间隔（Fetch 有账号 25 QPS + 域名级 QPS 限制） |
+| `--max-urls N` | 一次最多抓几个 URL（默认 3，0 = 不限）：防止一口气拉全文爆上下文 |
 | `--fail-fast` | 任一 URL 失败立即退出（默认继续，最后 exit 3） |
 | `--no-cache` / `--cache-ttl SECONDS` / `--cache-dir DIR` | 缓存控制：默认按 url 缓存 1 天，`0` 表示永不过期（`--no-cache` 只禁读、仍写入） |
 
 ### 输出模式
 
-- 默认：面向模型的精简文本（标题 / URL / 来源·日期·score·authority / Summary），不含 `site_icon` 等噪音。
+- 默认（精简，面向模型）：
+  ```
+  [1] 标题  (站点 · 2026-04-24 · 2.57 · auth4)
+      https://example.com/article
+
+  摘要正文（已去噪）
+  ```
+  相比四行标签格式约省 **6~8%** 字符：去掉标签列、`site_icon`、`unknown` 占位；
+  摘要会清理 HTML 标签/Markdown 强调/与标题重复的 H1/新闻页样板行（`发布于：…`、`来源：…`、`责任编辑：…`），
+  但保留表格行、省略号与长句；URL 会去掉 `utm_*`/`spm`/`scm`/空值参数等跟踪尾巴。
+- `--full-meta`：回到四行定宽标签格式（人读/调试更直观）。
 - `--json`：处理后的结构化 JSON（含 `stats` 或 `failures`）。
 - `--raw`：接口原始响应。
 - `--dry-run`：只打印将要发送的 endpoint + payload，不发请求。

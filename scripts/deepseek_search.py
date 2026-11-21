@@ -230,8 +230,9 @@ def api_post(kind, payload, timeout, api_key):
 # 本地后处理（纯规则：去重 / 过滤 / 重排 / 截断 / 摘录）
 # --------------------------------------------------------------------------- #
 _TRACKING_RE = re.compile(
-    r"^(utm_[^=&]*|ref|ref_src|ref_url|fbclid|gclid|yclid|msclkid|mc_cid|mc_eid|spm|"
-    r"from|source|share_token|share_source)$",
+    r"^(utm_[^=&]*|ref|ref_src|ref_url|fbclid|gclid|yclid|msclkid|mc_cid|mc_eid|spm|scm|"
+    r"trans_?|_trans_|from|source|share|share_token|share_source|tt_from|wxshare|"
+    r"hmsr|hmpl|hmcu|hmkw|hmci|upstream_biz|referfrom|referer|refer)$",
     re.I,
 )
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
@@ -249,8 +250,8 @@ def num(value, default=0.0):
         return default
 
 
-def normalize_url(url):
-    """去重用的 URL 归一化：去掉 fragment、尾斜杠与常见跟踪参数。"""
+def display_url(url):
+    """展示/引用用的 URL：去掉 fragment、跟踪参数与尾斜杠（保留 ?id= 这类真实参数）。"""
     if not url:
         return ""
     u = str(url).strip().split("#", 1)[0]
@@ -259,12 +260,23 @@ def normalize_url(url):
         kept = [
             part
             for part in query.split("&")
-            if part and not _TRACKING_RE.match(part.split("=", 1)[0])
+            if part
+            and not _TRACKING_RE.match(part.split("=", 1)[0])
+            and part.split("=", 1)[-1].strip() != ""
         ]
         u = base + "?" + "&".join(kept) if kept else base
     if "://" in u:
         scheme, rest = u.split("://", 1)
-        rest = rest.rstrip("/")
+        u = scheme + "://" + rest.rstrip("/")
+    u = re.sub(r"/+\?", "?", u)
+    return u
+
+
+def normalize_url(url):
+    """去重用的 URL 归一化：在 display_url 基础上把语言/地区前缀也视作同页。"""
+    u = display_url(url)
+    if "://" in u:
+        scheme, rest = u.split("://", 1)
         head, sep, tail = rest.partition("/")
         if sep and tail.split("/", 1)[0].lower() in _LOCALE_SEGMENTS:
             rest = head + "/" + tail.split("/", 1)[-1] if "/" in tail else head
@@ -344,11 +356,27 @@ def truncate(text, limit):
     return text[:limit].rstrip() + TRUNC_MARK.format(total=len(text))
 
 
+_TITLE_SEPS = (" - ", " | ", " — ", " – ", " _ ", "｜", "—")
+
+
 def _title_key(text):
     """把标题压成可比较的形式：折叠空白，丢掉"标题 - 站点"式的后缀。"""
     t = re.sub(r"\s+", " ", (text or "")).strip()
-    for sep in (" - ", " | ", " — ", " – ", " _ ", "｜", "—"):
+    for sep in _TITLE_SEPS:
         t = t.split(sep)[0].strip()
+    return t
+
+
+def clean_title(text):
+    """压缩重复标题：'A - A' / 'A | B | A' 这类只保留一份。"""
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t:
+        return ""
+    for sep in _TITLE_SEPS:
+        if sep in t:
+            parts = [p.strip() for p in t.split(sep) if p.strip()]
+            if len(parts) > 1 and len(set(parts)) == 1:
+                return parts[0]
     return t
 
 
@@ -410,23 +438,126 @@ def excerpt(text, keywords, pad=1):
 # --------------------------------------------------------------------------- #
 # 输出格式化
 # --------------------------------------------------------------------------- #
+_HTML_TAG_RE = re.compile(
+    r"</?(?:strong|b|em|i|br|p|div|span|code|pre|sup|sub|a|img)\b[^>]*>", re.I
+)
+
+
+_BOILER_LINE_RE = re.compile(
+    r"^(?:\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?"
+    r"|发布于.*|来源[:：].*|作者[:：].*|编辑[:：].*|责任编辑[:：].*|原标题[:：].*"
+    r"|(?:扫码|微信扫码|长按识别).*|(?:点击|点此)(?:查看|阅读|了解).*"
+    r"|举报.*|分享到.*|相关阅读.*|上一篇.*|下一篇.*|返回(?:搜狐|首页).*"
+    r"|版权(?:所有)?.*|Copyright.*|免责声明.*"
+    r"|.{1,12}\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*$)",
+    re.I,
+)
+
+
+def strip_boilerplate_lines(text):
+    """删掉摘要里明显的新闻页样板行（仅限短行，避免误删正文句子）。"""
+    if not text:
+        return ""
+    kept = []
+    for line in str(text).split("\n"):
+        probe = line.strip()
+        if (
+            probe
+            and len(probe) <= 40
+            and not re.search(r"[。！？；]", probe)
+            and _BOILER_LINE_RE.match(probe)
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def clean_summary(text, title=None):
+    """摘要去噪：HTML 标签、与标题重复的开头 H1、markdown 强调、多余空行/空格。
+
+    表格行（含 |）与省略号保留：前者往往是有价值的数据，后者表示上游已截断。
+    """
+    if not text:
+        return ""
+    t = str(text).replace("\r\n", "\n")
+    t = _HTML_TAG_RE.sub(lambda m: "\n" if m.group(0).lower().startswith("<br") else "", t)
+    if title:
+        t = strip_leading_title(t, title)
+    t = t.replace("**", "").replace("__", "")
+    t = strip_boilerplate_lines(t)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"\n +", "\n", t)
+    return t.strip()
+
+
+def clean_items(items):
+    """给 JSON 输出用的浅拷贝：只清洗 summary/snippet，不动原始数据。"""
+    out = []
+    for item in items:
+        copy = dict(item)
+        copy["title"] = clean_title(item.get("title"))
+        copy["summary"] = clean_summary(item.get("summary") or "", item.get("title"))
+        copy["snippet"] = clean_summary(item.get("snippet") or "")
+        out.append(copy)
+    return out
+
+
 def short_date(value):
     if not isinstance(value, str) or len(value) < 10:
         return "unknown"
     return value[:10]
 
 
-def format_search_text(items, max_summary, max_content):
-    lines = []
+def item_meta(item):
+    """单行元信息：站点 · 日期 · 分数 · 权威，缺失项直接省略。"""
+    parts = []
+    if item.get("site_name"):
+        parts.append(str(item["site_name"]).strip())
+    date = short_date(item.get("date"))
+    if date != "unknown":
+        parts.append(date)
+    if item.get("rerank_score") is not None:
+        parts.append("%.2f" % num(item["rerank_score"], 0))
+    if item.get("authority") is not None:
+        parts.append("auth%s" % item["authority"])
+    return " · ".join(parts)
+
+
+def format_search_text(items, max_summary, max_content, compact=True):
+    """compact：标题行带元信息 + URL 行 + 摘要正文（默认，省 token）。
+    full：四行定宽标签（--full-meta，人读友好）。"""
+    blocks = []
     for idx, item in enumerate(items, 1):
-        title = (item.get("title") or "(无标题)").strip()
+        title = clean_title(item.get("title")) or "(无标题)"
         summary = (item.get("summary") or "").strip() or (item.get("snippet") or "").strip()
+        summary = clean_summary(summary, title)
         if max_summary and max_summary > 0 and len(summary) > max_summary:
             summary = summary[:max_summary].rstrip() + "…"
+        content = (item.get("content") or "").strip()
         score = item.get("rerank_score")
         authority = item.get("authority")
-        lines.append("[%d] %s" % (idx, title))
-        lines.append("    URL:       %s" % (item.get("url") or ""))
+
+        if compact:
+            meta = item_meta(item)
+            head = "[%d] %s" % (idx, title)
+            if meta:
+                head += "  (%s)" % meta
+            lines = [head, "    %s" % display_url(item.get("url") or "")]
+            if summary:
+                lines.append("")
+                lines.append(summary)
+            if content and max_content and max_content > 0:
+                lines.append("")
+                lines.append("[Content]")
+                lines.append(truncate(content, max_content))
+            blocks.append("\n".join(lines))
+            continue
+
+        lines = [
+            ("[%d] %s" % (idx, title)),
+            ("    URL:       %s" % display_url(item.get("url") or "")),
+        ]
         lines.append(
             "    Source:    %s  |  date: %s  |  score: %s  |  authority: %s"
             % (
@@ -437,11 +568,10 @@ def format_search_text(items, max_summary, max_content):
             )
         )
         lines.append("    Summary:   %s" % (summary or "(空)"))
-        content = (item.get("content") or "").strip()
         if content and max_content and max_content > 0:
-            body = truncate(content, max_content)
-            lines.append("    Content:   " + body.replace("\n", "\n               "))
-    return "\n".join(lines)
+            lines.append("    Content:   " + truncate(content, max_content).replace("\n", "\n               "))
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
 
 
 def format_fetch_text(doc, index=None, total=None):
@@ -628,11 +758,14 @@ def run_search(args):
     if args.raw:
         dump_json(data)
     elif args.json:
-        dump_json({"query": query, "count": len(items), "results": items, "stats": stats})
+        clean = clean_items(items)
+        dump_json({"query": query, "count": len(clean), "results": clean, "stats": stats})
     elif not items:
         print("No matching results.")
     else:
-        print(format_search_text(items, max_summary, max_content))
+        print(
+            format_search_text(items, max_summary, max_content, compact=not args.full_meta)
+        )
         if stats["shown"] != stats["raw"]:
             reasons = []
             if stats["duplicate"]:
@@ -684,6 +817,12 @@ def run_fetch(args):
             urls.append(url)
     if not urls:
         raise UsageError("至少需要一个 URL")
+    max_urls = _range_int("--max-urls", args.max_urls, 0, 50)
+    if max_urls and len(urls) > max_urls:
+        raise UsageError(
+            "一次最多抓 %d 个 URL（当前 %d）。请拆批或显式传 --max-urls N（0=不限）"
+            % (max_urls, len(urls))
+        )
 
     max_chars = _range_int("--max-chars", args.max_chars, 0, 10000000)
     delay = _range_float("--delay", args.delay, 0, 60)
@@ -891,6 +1030,7 @@ def build_parser():
     post.add_argument("--no-dedupe", action="store_true", help="关闭 URL 去重")
     post.add_argument("--max-summary", default=800, help="每条摘要最多字符数（默认 800；0=不限，建议保留全文）")
     post.add_argument("--max-content", default=1500, help="--need-content 时每条正文最多字符数（默认 1500；0=不显示）")
+    post.add_argument("--full-meta", action="store_true", help="输出四行完整标签（默认：单行元信息，更省 token）")
     add_common(sp)
 
     # ---- fetch ----
@@ -912,6 +1052,7 @@ def build_parser():
                     help="只摘录命中关键词的段落（含前后文），可重复/逗号分隔")
     fp.add_argument("--keyword-pad", default=1, help="关键词摘录时保留的前后段落数（默认 1）")
     fp.add_argument("--delay", default=0.2, help="多个 URL 之间的间隔秒数（默认 0.2，避免触发域名 QPS 限制）")
+    fp.add_argument("--max-urls", default=3, help="一次最多抓多少个 URL（默认 3，0=不限）")
     fp.add_argument("--fail-fast", action="store_true", help="任一 URL 失败立即退出（默认继续，最后 exit 3）")
     add_cache(fp)
     add_common(fp)
