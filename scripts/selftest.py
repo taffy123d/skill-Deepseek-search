@@ -213,6 +213,70 @@ class TestCache(unittest.TestCase):
         self.assertIsNone(ds.cache_read(broken, 60))
 
 
+class TestBudgetAllocation(unittest.TestCase):
+    def test_no_budget_returns_desired(self):
+        self.assertEqual(ds.allocate_budget([300, 200], 0), [300, 200])
+
+    def test_within_budget_unchanged(self):
+        self.assertEqual(ds.allocate_budget([300, 200], 1000), [300, 200])
+
+    def test_total_never_exceeds_budget(self):
+        allocs = ds.allocate_budget([800] * 10, 4000)
+        self.assertLessEqual(sum(allocs), 4000)
+        self.assertGreater(sum(allocs), 4000 * 0.95)  # 取整损失 < n 字符
+
+    def test_tail_omitted_with_tight_budget(self):
+        allocs = ds.allocate_budget([800] * 10, 900)
+        self.assertEqual(allocs[-1], 0)
+        self.assertTrue(all(a == 0 or a >= ds.MIN_SUMMARY_CHARS for a in allocs))
+
+    def test_earlier_items_get_more(self):
+        allocs = ds.allocate_budget([800] * 5, 2000)
+        self.assertEqual(allocs, sorted(allocs, reverse=True))
+        self.assertGreater(allocs[0], allocs[-1])
+
+    def test_tail_small_share_is_omitted_not_sliced(self):
+        allocs = ds.allocate_budget([800] * 10, 1500)
+        # 份额不足 120 字符时宁可省略，也不给无意义的碎片
+        self.assertTrue(all(a == 0 or a >= ds.MIN_SUMMARY_CHARS for a in allocs))
+
+    def test_short_item_leaves_room_for_others(self):
+        allocs = ds.allocate_budget([50, 800, 800], 900)
+        self.assertEqual(allocs[0], 50)          # 短条目拿满即可
+        self.assertGreater(allocs[1], 300)       # 余额回流给后面
+        self.assertLessEqual(sum(allocs), 900)
+
+    def test_empty_list(self):
+        self.assertEqual(ds.allocate_budget([], 1000), [])
+
+
+class TestBudgetFormatting(unittest.TestCase):
+    def test_markers_and_stats(self):
+        items = [make_item("https://a.com/%d" % i, summary="字" * 400) for i in range(1, 4)]
+        stats = {}
+        text = ds.format_search_text(items, 800, 0, budget=200, budget_stats=stats)
+        self.assertIn("[摘要按 --budget 省略", text)
+        self.assertIn("…[原文 400 字]", text)
+        self.assertEqual(stats["budget"], 200)
+        self.assertLessEqual(stats["budget_used"], 200)
+        self.assertEqual(stats["truncated"] + stats["omitted"], 3)
+
+    def test_no_marker_when_within_budget(self):
+        items = [make_item("https://a.com/1", summary="短摘要")]
+        stats = {}
+        text = ds.format_search_text(items, 800, 0, budget=1000, budget_stats=stats)
+        self.assertNotIn("--budget", text)
+        self.assertEqual(stats["truncated"], 0)
+        self.assertEqual(stats["omitted"], 0)
+
+    def test_items_kept_even_when_summary_omitted(self):
+        items = [make_item("https://a.com/%d" % i, summary="字" * 300) for i in range(1, 6)]
+        text = ds.format_search_text(items, 800, 0, budget=150)
+        for i in range(1, 6):
+            self.assertIn("[%d] t:https://a.com/%d" % (i, i), text)
+            self.assertIn("https://a.com/%d" % i, text)
+
+
 class TestTitleCleaning(unittest.TestCase):
     def test_collapses_self_duplicated_title(self):
         self.assertEqual(ds.clean_title("A - A"), "A")
@@ -257,6 +321,52 @@ class TestSummaryCleaning(unittest.TestCase):
         self.assertEqual(json.loads(out)["results"][0]["summary"], "重点 正文")
         code, out, _, _ = run_cli(["search", "q", "--raw"], search_payload(item))
         self.assertEqual(json.loads(out)["results"][0]["summary"], "<strong>重点</strong> 正文")
+
+
+class TestFetchTotalBudget(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ds-totalbudget-")
+        self.base = ["fetch", "--cache-dir", self.dir, "--delay", "0", "--no-cache"]
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _payload(self, size=600):
+        return lambda kind, body: {"title": "t", "content": "正" * size}
+
+    def test_total_budget_respected(self):
+        code, out, _, _ = run_cli(self.base + ["https://a.com/1", "https://a.com/2", "--total-max-chars", "600"], self._payload())
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertLessEqual(out.count("正"), 600)
+        self.assertIn("已截断", out)
+
+    def test_budget_consumed_marks_omitted(self):
+        code, out, _, _ = run_cli(
+            self.base + ["https://a.com/%d" % i for i in range(1, 4)] + ["--total-max-chars", "1"],
+            self._payload(500),
+        )
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("预算省略", out)
+        self.assertIn("https://a.com/3", out)  # 条目仍在，只是正文被省略
+
+    def test_no_budget_means_only_max_chars(self):
+        code, out, _, _ = run_cli(self.base + ["https://a.com/1"], self._payload(500))
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertEqual(out.count("正"), 500)  # 未截断
+
+    def test_json_reports_allocation(self):
+        code, out, _, _ = run_cli(
+            self.base + ["https://a.com/1", "https://a.com/2", "--total-max-chars", "300", "--json"],
+            self._payload(600),
+        )
+        obj = json.loads(out)
+        self.assertEqual(obj["total_max_chars"], 300)
+        self.assertEqual(obj["results"][0]["allocated"], 150)
+        self.assertTrue(all(r["allocated"] is not None for r in obj["results"]))
+
+    def test_invalid_budget_rejected(self):
+        code, _, _, _ = run_cli(self.base + ["https://a.com/1", "--total-max-chars", "-5"], self._payload())
+        self.assertEqual(code, "raised:UsageError")
 
 
 class TestMaxUrls(unittest.TestCase):
@@ -490,6 +600,22 @@ class TestRunSearchFlow(unittest.TestCase):
         code, out, _, _ = run_cli(["search", "q", "--limit", "2"], payload)
         self.assertEqual(code, ds.EXIT_OK)
         self.assertIn("受 --limit 2 限制", out)
+
+    def test_budget_footer_and_no_overflow(self):
+        payload = search_payload(*[make_item("https://a.com/%d" % i, summary="z" * 300) for i in range(1, 5)])
+        code, out, _, _ = run_cli(["search", "q", "--budget", "400"], payload)
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("-- 预算", out)
+        self.assertIn("省略", out)
+        body = out.split("-- 预算")[0]
+        self.assertLessEqual(body.count("z"), 400)  # 摘要字符不超预算
+
+    def test_budget_in_json_stats(self):
+        payload = search_payload(make_item("https://a.com/1", summary="字" * 300))
+        code, out, _, _ = run_cli(["search", "q", "--budget", "100", "--json"], payload)
+        stats = json.loads(out)["stats"]
+        self.assertEqual(stats["budget"], 100)
+        self.assertLessEqual(stats["budget_used"], 100)
 
     def test_json_output_shape(self):
         payload = search_payload(make_item("https://a.com/1", score=2.5))

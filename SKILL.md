@@ -30,6 +30,7 @@ bash scripts/deepseek-search.sh search "<关键词>" \
 - 有站点/时效/精确匹配要求时加 flag（也可直接写在 query 里）：`--site`、`--exclude-site`、`--phrase`、`--exclude-phrase`、`--exclude`、`--lang zh,en`、`--after 2025`、`--before 2025-12-31`。
 - 脚本已内置本地后处理：URL 归一化去重（去 fragment/尾斜杠/utm 等跟踪参数）→ `rerank_score < 1.5` 过滤 → 权威优先重排（authority > score > 日期）。若全被过滤掉会自动回退为不过滤并告警。
 - 官方文档/政策类问题更吃来源质量；若 `--sort authority` 把自媒体顶到前面，改 `--sort score` 或加 `--min-authority 3`。
+- **上下文紧张时用总预算**：`--budget 4000`（摘要合计封顶，按排名递减分配）。被压的条目会标注 `[摘要按 --budget 省略，原 N 字]`，标题/URL/元信息仍在，需要细节再单独 fetch。
 
 ### 步骤 2：读结果（不花钱）
 
@@ -48,7 +49,7 @@ bash scripts/deepseek-search.sh fetch "<URL1>" "<URL2>" --max-chars 8000 --keywo
 ```
 
 - 一轮最多 3 个 URL（脚本默认 `--max-urls 3` 会硬拦），挑最可能含细节的链接；禁止抓无关链接。
-- `--max-chars` 为单篇上限（默认 10000），超长会追加 `[…已截断，原文 N 字符…]` 标记；上下文紧张时用 `--keywords` 只摘录命中段落（含前后各 1 段）。
+- `--max-chars` 为单篇上限（默认 10000），超长会追加 `[…已截断，原文 N 字符…]` 标记；上下文紧张时用 `--keywords` 只摘录命中段落（含前后各 1 段），或用 `--total-max-chars 8000` 给多篇正文设总预算。
 - 多 URL 时单篇失败不中断（stderr 提示，末尾 exit 3）；需要失败即停用 `--fail-fast`。
 
 ### 步骤 4：作答

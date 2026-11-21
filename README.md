@@ -66,6 +66,7 @@ bash scripts/deepseek-search.sh --help
 | `--no-dedupe` | 关闭 URL 去重（默认去重：忽略 fragment、尾斜杠、`utm_*` 等跟踪参数） |
 | `--max-summary N` | 每条摘要字符上限（默认 800，覆盖官方摘要长度，不再截到 400） |
 | `--max-content N` | `--need-content` 时正文上限（默认 1500；0 = 不显示） |
+| `--budget N` | 本次结果摘要的**字符总预算**（默认 0=不限）：按排名递减分配，份额不足 120 字符的条目只留标题+URL |
 | `--full-meta` | 输出四行完整标签（默认精简：标题行带 `(站点 · 日期 · 分数 · authN)`） |
 
 过滤后为空会自动回退为不过滤（stderr 告警），不会给你一个空列表。
@@ -78,8 +79,32 @@ bash scripts/deepseek-search.sh --help
 | `--keywords "a,b"` | 段落级关键词摘录（保留命中段 + 前后各 `--keyword-pad` 段，默认 1） |
 | `--delay 0.2` | 多 URL 之间的请求间隔（Fetch 有账号 25 QPS + 域名级 QPS 限制） |
 | `--max-urls N` | 一次最多抓几个 URL（默认 3，0 = 不限）：防止一口气拉全文爆上下文 |
+| `--total-max-chars N` | 本次所有 URL 正文的**字符总预算**（默认 0=不限）：按剩余篇数均分、余额回流，份额不足 120 字符则省略该篇正文 |
 | `--fail-fast` | 任一 URL 失败立即退出（默认继续，最后 exit 3） |
 | `--no-cache` / `--cache-ttl SECONDS` / `--cache-dir DIR` | 缓存控制：默认按 url 缓存 1 天，`0` 表示永不过期（`--no-cache` 只禁读、仍写入） |
+
+### 上下文预算（--budget / --total-max-chars）
+
+`--max-summary` 是**逐条**上限，总量仍不可预测（`--count 10 --max-summary 800` 最坏 8000+ 字符）。加总预算就能把上下文占用变成确定值：
+
+```bash
+# 6~10 条结果，摘要总字符封顶 4000；超出按排名递减分配
+bash scripts/deepseek-search.sh search "DeepSeek V4" --count 10 --budget 4000
+
+# 3 个 URL，正文合计封顶 8000（先按剩余篇数均分，某篇用不完的额度回流给后面的）
+bash scripts/deepseek-search.sh fetch "URL1" "URL2" "URL3" --total-max-chars 8000
+```
+
+行为约定（避免误解）：
+
+| 情况 | 输出 |
+| --- | --- |
+| 额度够 | 摘要/正文原样显示，无任何标记 |
+| 额度不够但 ≥120 字符 | 截到额度长度 + `…[原文 N 字]` |
+| 额度 <120 字符 | 只省略摘要，保留标题/URL/元信息，标注 `[摘要按 --budget 省略，原 N 字]` 或 `[正文按 --total-max-chars 预算省略，原文 N 字符]` |
+| 不限（默认） | `--budget 0` / `--total-max-chars 0`，行为与之前一致 |
+
+末尾会打印 `-- 预算 1904/2000 字符（截断 5 条、省略 1 条摘要）`，方便判断要不要补抓。
 
 ### 输出模式
 

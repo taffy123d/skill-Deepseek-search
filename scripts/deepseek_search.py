@@ -38,6 +38,7 @@ MAX_ORI_QUESTION_CHARS = 128
 MAX_URL_CHARS = 8192
 
 GOOD_SCORE = 1.5      # rerank_score >= 1.5 为优质结果（官方定义）
+MIN_SUMMARY_CHARS = 120  # 预算分配时，低于该长度的摘要份额视为“不够用”，直接省略
 AUTHORITY_STRONG = 3  # authority >= 3 为极权威结果（官方定义）
 
 # 单篇正文被截断时追加的标记
@@ -346,6 +347,33 @@ def process_results(results, min_score=0.0, min_authority=-2, sort_mode="rank", 
     return kept, stats
 
 
+def allocate_budget(desired, budget, min_chars=MIN_SUMMARY_CHARS):
+    """按排名递减权重把 budget 分给各条（desired 为各自想要的长度）。
+
+    - 前面的条目权重高，拿到更多额度；
+    - 某条想要的长度小于分到的份额时，余额自动回流给后面的条目；
+    - 份额不足 min_chars 的条目返回 0（调用方据此省略摘要，只留标题+URL）。
+    """
+    n = len(desired)
+    if budget <= 0 or n == 0:
+        return list(desired)
+    allocs = [0] * n
+    remaining = budget
+    weights = [n - i for i in range(n)]  # n, n-1, ..., 1
+    wrem = sum(weights)
+    for i, want in enumerate(desired):
+        if remaining <= 0 or wrem <= 0:
+            allocs[i] = 0
+        else:
+            share = int(remaining * weights[i] / wrem)
+            allocs[i] = min(want, max(0, share))
+        if 0 < allocs[i] < min(min_chars, desired[i]):
+            allocs[i] = 0
+        remaining -= allocs[i]
+        wrem -= weights[i]
+    return allocs
+
+
 def truncate(text, limit):
     if not text:
         return ""
@@ -524,19 +552,50 @@ def item_meta(item):
     return " · ".join(parts)
 
 
-def format_search_text(items, max_summary, max_content, compact=True):
+def format_search_text(items, max_summary, max_content, compact=True, budget=0, budget_stats=None):
     """compact：标题行带元信息 + URL 行 + 摘要正文（默认，省 token）。
-    full：四行定宽标签（--full-meta，人读友好）。"""
+    full：四行定宽标签（--full-meta，人读友好）。
+    budget > 0 时按排名分配总字符预算，统计写入 budget_stats。"""
+    titles = [clean_title(item.get("title")) or "(无标题)" for item in items]
+    summaries = []
+    for item, title in zip(items, titles):
+        raw = (item.get("summary") or "").strip() or (item.get("snippet") or "").strip()
+        text = clean_summary(raw, title)
+        if max_summary and max_summary > 0 and len(text) > max_summary:
+            text = text[:max_summary].rstrip() + "…"
+        summaries.append(text)
+
+    allocs = None
+    if budget and budget > 0 and summaries:
+        allocs = allocate_budget([len(t) for t in summaries], budget)
+        used = sum(min(len(t), a) for t, a in zip(summaries, allocs))
+        if budget_stats is not None:
+            budget_stats.update(
+                {
+                    "budget": budget,
+                    "budget_used": used,
+                    "budget_demand": sum(len(t) for t in summaries),
+                    "truncated": sum(
+                        1 for t, a in zip(summaries, allocs) if 0 < a < len(t)
+                    ),
+                    "omitted": sum(1 for t, a in zip(summaries, allocs) if a == 0 and t),
+                }
+            )
+
     blocks = []
     for idx, item in enumerate(items, 1):
-        title = clean_title(item.get("title")) or "(无标题)"
-        summary = (item.get("summary") or "").strip() or (item.get("snippet") or "").strip()
-        summary = clean_summary(summary, title)
-        if max_summary and max_summary > 0 and len(summary) > max_summary:
-            summary = summary[:max_summary].rstrip() + "…"
+        title = titles[idx - 1]
+        summary = summaries[idx - 1]
+        if allocs is not None:
+            allowed = allocs[idx - 1]
+            if allowed == 0 and summary:
+                summary = "[摘要按 --budget 省略，原 %d 字]" % len(summary)
+            elif allowed < len(summary):
+                summary = summary[:allowed].rstrip() + "…[原文 %d 字]" % len(summary)
         content = (item.get("content") or "").strip()
         score = item.get("rerank_score")
         authority = item.get("authority")
+
 
         if compact:
             meta = item_meta(item)
@@ -726,6 +785,7 @@ def run_search(args):
     limit = _range_int("--limit", args.limit, 0, 50)
     max_summary = _range_int("--max-summary", args.max_summary, 0, 100000)
     max_content = _range_int("--max-content", args.max_content, 0, 1000000)
+    budget = _range_int("--budget", args.budget, 0, 10000000)
     if args.ori_question and len(args.ori_question) > MAX_ORI_QUESTION_CHARS:
         raise UsageError("--ori-question 超过 %d 个字符" % MAX_ORI_QUESTION_CHARS)
 
@@ -759,14 +819,44 @@ def run_search(args):
         dump_json(data)
     elif args.json:
         clean = clean_items(items)
+        if budget and budget > 0:
+            budget_stats = {}
+            format_search_text(
+                items,
+                max_summary,
+                0,
+                compact=True,
+                budget=budget,
+                budget_stats=budget_stats,
+            )
+            stats.update(budget_stats)
         dump_json({"query": query, "count": len(clean), "results": clean, "stats": stats})
     elif not items:
         print("No matching results.")
     else:
+        budget_stats = {}
         print(
-            format_search_text(items, max_summary, max_content, compact=not args.full_meta)
+            format_search_text(
+                items,
+                max_summary,
+                max_content,
+                compact=not args.full_meta,
+                budget=budget,
+                budget_stats=budget_stats,
+            )
         )
-        if stats["shown"] != stats["raw"]:
+        if budget_stats:
+            print(
+                "\n-- 预算 %d/%d 字符（截断 %d 条、省略 %d 条摘要），排序：%s"
+                % (
+                    budget_stats["budget_used"],
+                    budget_stats["budget"],
+                    budget_stats["truncated"],
+                    budget_stats["omitted"],
+                    args.sort,
+                )
+            )
+        if stats["shown"] != stats["raw"] and not budget_stats:
             reasons = []
             if stats["duplicate"]:
                 reasons.append("去重 %d" % stats["duplicate"])
@@ -825,6 +915,7 @@ def run_fetch(args):
         )
 
     max_chars = _range_int("--max-chars", args.max_chars, 0, 10000000)
+    total_budget = _range_int("--total-max-chars", args.total_max_chars, 0, 100000000)
     delay = _range_float("--delay", args.delay, 0, 60)
     ttl = _range_int("--cache-ttl", args.cache_ttl, 0, 10 ** 9)
     pad = _range_int("--keyword-pad", args.keyword_pad, 0, 10)
@@ -836,6 +927,7 @@ def run_fetch(args):
                 "endpoint": BASE_URL + "/fetch",
                 "payloads": [{"url": u} for u in urls],
                 "max_chars": max_chars,
+                "total_max_chars": total_budget,
                 "keywords": keywords,
             }
         )
@@ -846,6 +938,7 @@ def run_fetch(args):
 
     docs = []
     failures = []
+    remaining = total_budget  # --total-max-chars 剩余额度（0 = 不限）
     for index, url in enumerate(urls, 1):
         title = ""
         content = ""
@@ -890,17 +983,36 @@ def run_fetch(args):
         body = strip_leading_title(content, title)
         if keywords:
             body = excerpt(body, keywords, pad)
-        was_truncated = bool(max_chars and max_chars > 0 and len(body) > max_chars)
-        body = truncate(body, max_chars)
+        limit = max_chars  # 0 = 单篇不限
+        if total_budget:
+            slots = max(1, len(urls) - index + 1)  # 含当前这篇在内的剩余篇数
+            share = max(0, remaining) // slots
+            if 0 < share < MIN_SUMMARY_CHARS:
+                limit = 0  # 份额太小，切片没有意义 -> 省略正文
+            else:
+                limit = share if not max_chars else min(max_chars, share)
+
+        omitted = bool(total_budget and limit <= 0 and body)
+        if omitted:
+            out_body = "[正文按 --total-max-chars 预算省略，原文 %d 字符]" % len(body)
+            used = 0
+        else:
+            used = min(len(body), limit) if limit and limit > 0 else len(body)
+            out_body = truncate(body, limit)
+        if total_budget:
+            remaining -= used
+        was_truncated = bool(limit and limit > 0 and len(body) > limit)
         docs.append(
             {
                 "url": url,
                 "title": title,
-                "content": body,
+                "content": out_body,
                 "content_raw": content,
                 "raw_length": len(content),
                 "cached": cached,
                 "truncated": was_truncated,
+                "omitted": omitted,
+                "allocated": limit if total_budget else None,
             }
         )
 
@@ -918,9 +1030,12 @@ def run_fetch(args):
                         "cached": d["cached"],
                         "original_length": d["raw_length"],
                         "truncated": d["truncated"],
+                        "omitted": d["omitted"],
+                        "allocated": d["allocated"],
                     }
                     for d in docs
                 ],
+                "total_max_chars": total_budget,
                 "failures": [{"url": u, "error": m} for u, m in failures],
             }
         )
@@ -1030,6 +1145,11 @@ def build_parser():
     post.add_argument("--no-dedupe", action="store_true", help="关闭 URL 去重")
     post.add_argument("--max-summary", default=800, help="每条摘要最多字符数（默认 800；0=不限，建议保留全文）")
     post.add_argument("--max-content", default=1500, help="--need-content 时每条正文最多字符数（默认 1500；0=不显示）")
+    post.add_argument(
+        "--budget",
+        default=0,
+        help="本次结果摘要的字符总预算（0=不限）。按排名递减分配，份额不足的条目只留标题+URL",
+    )
     post.add_argument("--full-meta", action="store_true", help="输出四行完整标签（默认：单行元信息，更省 token）")
     add_common(sp)
 
@@ -1053,6 +1173,11 @@ def build_parser():
     fp.add_argument("--keyword-pad", default=1, help="关键词摘录时保留的前后段落数（默认 1）")
     fp.add_argument("--delay", default=0.2, help="多个 URL 之间的间隔秒数（默认 0.2，避免触发域名 QPS 限制）")
     fp.add_argument("--max-urls", default=3, help="一次最多抓多少个 URL（默认 3，0=不限）")
+    fp.add_argument(
+        "--total-max-chars",
+        default=0,
+        help="本次所有 URL 正文的字符总预算（0=不限），按顺序均分、余额回流",
+    )
     fp.add_argument("--fail-fast", action="store_true", help="任一 URL 失败立即退出（默认继续，最后 exit 3）")
     add_cache(fp)
     add_common(fp)
