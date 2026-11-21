@@ -40,7 +40,8 @@ description: 使用 DeepSeek 搜索引擎做实时网页搜索、把网页抓成
 bash scripts/deepseek-search.sh search "<关键词>" [选项]      # 只拿摘要
 bash scripts/deepseek-search.sh fetch "<URL>" [<URL>…] [选项]  # 抓正文
 bash scripts/deepseek-deep-think.sh "<问题>" [选项]            # 深度思考搜索（方案 A）
-# 等价写法：bash scripts/deepseek-search.sh deep-think "<问题>" [选项]
+bash scripts/deepseek-peak.sh [选项]                          # 当前是高峰还是空闲（读系统时间）
+# 等价写法：bash scripts/deepseek-search.sh deep-think "<问题>" / bash scripts/deepseek-search.sh peak
 ```
 
 完整参数：加 `--help`（不调用 API、不花钱）。`--dry-run` 打印将要发送的请求体，同样免费。
@@ -87,7 +88,13 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
   --save-history .cache/deep-think/history.json            # 多轮
 ```
 
-常用参数：`--protocol chat|messages|responses`（默认 `chat`）、`--model`（默认 `deepseek-flash`）、`--max-tokens`、`--max-citations`（默认 8）、`--max-answer-chars`、`--thinking-chars`、`--log`、`--dump-raw`、`--timeout`、`--dry-run`。
+常用参数：`--protocol chat|messages|responses`（默认 `chat`）、`--model`（默认 `deepseek-flash`）、`--effort low|high|max`（默认 `high`）、`--converge`（软收敛提示，默认关）、`--max-tokens`、`--max-citations`（默认 8）、`--max-answer-chars`、`--thinking-chars`、`--log`、`--dump-raw`、`--timeout`、`--dry-run`。
+
+**`--effort` 怎么选**（实测同题 `low` 比 `high` 省约 36%）：
+
+- `--effort low`：单点核对、只要数字/结论、时间敏感 → 思考链更短、更早收敛。
+- `--effort high`（默认）：多跳、来源冲突、综述对比 → 推理深度不够会答错，别省这钱。
+- `--converge`：加一句「够用即停、连续无新信息就收尾」。只是提示词，不保证生效；默认关。
 
 ### 返回什么（默认视图只有两样东西）
 
@@ -110,14 +117,17 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
 
 - 上一轮用过联网工具的回复**不能续写**，中断就重发原始请求。
 - 状态文件与协议绑定：`chat` 写的状态不能拿去跑 `--protocol responses`（脚本直接报错拒绝，不会发起请求白花 token）。
+- **多轮优先用 `chat` 协议**：`responses` 每轮要把上一轮 output items 全塞回 `input`（实测多轮输入 10392 tokens vs chat 1492），贵 3–7 倍。
 - 没有有效 `signature` 时，之前读过的网页不会拼回上下文（回答正文仍在）。
 - 只想问一个新问题，就别带 `--history`。
+- 失败不要重试 `deep_think`：`answer` 里明确说「未找到可靠信息」且问题本可固化成 query 时，**降级调一次 `search`**（¥0.005），不要再跑一次 deep-think。
 
 ### 边界（照做）
 
 - `tool_choice` 不支持强制联网；本脚本从不发送，也不要自己拼请求去试。
 - `deepseek_web_search` 不能与其他服务端工具（含 `web_search`、`custom`、`namespace`）同时声明；`allowed_domains` / `blocked_domains` / `user_location` 不支持。
-- 服务端最多约 **20 次**工具调用后作答；问题越模糊步数越多、越贵。
+- 服务端最多约 **20 次**工具调用后作答；**没有限步参数**（20 是硬顶，不是可调项），能调的只有 `--effort` / `--converge` / `--max-tokens`。
+- 不要期望用「继续搜」的追加调用延长检索，也不要对答案不满意就自动重试 deep-think。
 - 图片搜索只能走服务端联网工具（在问题里说明要看图即可），`search` 接口不支持。
 - 生成中失败（HTTP 200 但带 `error` / `status: failed`）脚本会打印错误 + usage 并 exit 2；`content_filter` / `length` 不会伪装成功。
 
@@ -134,32 +144,88 @@ bash scripts/deepseek-deep-think.sh "<追问>" \
 | 402 | 余额不足：告知用户充值，**不重试**（deep-think 同样） |
 | 401 | 密钥问题：检查 `DeepSeek_API_Key` 或 `DEEPSEEK_API_KEY` |
 | deep-think 400 | 看提示：工具重复声明 / 与其他工具同声明 / 强制 `tool_choice` / `allowed_domains` / `Content Exists Risk` / 上下文超限 / 上一轮用过联网工具不能续写 |
-| deep-think 步数暴涨 | 问题太模糊：缩小范围重问，或用 `--max-tokens` 限输出 |
+| deep-think 步数暴涨 | 问题太模糊：缩小范围重问，或用 `--effort low` / `--max-tokens` 限成本 |
 | 多数页面读不到 | 如实说明检索受限，给摘要级结论与已知来源 |
 
 退出码：`0` 成功 / `1` 参数或密钥问题 / `2` 接口或网络错误 / `3` 部分 URL 失败（fetch 多 URL，其余可用）。
 
-## 两本账（省钱硬规则）
+## 成本与时段（省钱硬规则）
+
+### 两本账
 
 | 命令 | 计费 |
 | --- | --- |
-| `search` / `fetch` | 按**成功请求次数**，各 ¥5/1000 次；`count` 不影响单价 |
-| `deep-think` | 服务端搜索/抓取**不计费**，只计模型 token（`thinking_tokens` 也算输出） |
+| `search` / `fetch` | 按**成功请求次数**，各 ¥5/1000 次（¥0.005/次）；`count` 不影响单价 |
+| `deep-think` | 服务端搜索/抓取**不计费**，只计模型 token（思考 token 也算输出） |
 
-省 `search`/`fetch`：默认不开 `--need-content`；一次 `--count 8` 优于 4 次 `--count 2`；同一 URL 靠缓存；一轮 fetch ≤3 URL。
+### 峰谷差价：先看时段再决定要不要现在跑
 
-省 `deep-think`：一次问清、缩小范围；`--max-tokens` 限输出；多轮只带必要历史；`--dry-run` 先看请求体；每次看 stderr 的 `input/cache_read/output/thinking` 与 `server_tool_use` 计数，步数暴涨是最早的预警。
+`deepseek-flash` 官方单价（元/百万 tokens）：
+
+| 项目 | 空闲时段 | 高峰时段 |
+| --- | --- | --- |
+| 输入·缓存命中 | 0.02 | 0.04 |
+| 输入·未命中 | 1 | 2 |
+| 输出（含思考） | 4 | 8 |
+
+高峰 = 北京时间周一至周五 09:00–12:00、14:00–18:00（不含法定节假日）；**其余时间价格直接减半**。
+
+```bash
+bash scripts/deepseek-peak.sh            # 空闲 ×1 | 2026-11-21 21:56 CST 周六 | 下次切换 …
+bash scripts/deepseek-peak.sh --json     # 给程序消费
+bash scripts/deepseek-peak.sh --check    # 0=空闲 / 2=高峰，便于 shell 分支
+```
+
+用法：**不急的批量活排到空闲时段**（省钱一半）；用户在等结果的即时请求不必等。节假日未内置，用 `--holidays` 或 `DEEPSEEK_PEAK_HOLIDAYS` 传入（不传则把假日当工作日，偏保守）。
+
+### 钱花在哪（实测账本，空闲时段）
+
+| 场景 | 成本 |
+| --- | --- |
+| 一次 `search` 或 `fetch` | ¥0.005 |
+| `search` + 2×`fetch` | ¥0.015 |
+| deep-think 单搜索（`--effort high`） | ¥0.0042–0.0049（比一次 search 还便宜） |
+| deep-think 单搜索（`--effort low`） | ≈¥0.003 |
+| deep-think 多跳（`high` / `low`） | ¥0.0142 / **¥0.0091**（low 省 36%） |
+| deep-think 无需检索 | ≈¥0.0011（固定下限） |
+| 多轮追问一轮（chat / responses） | +¥0.0023 / +¥0.0078 |
+
+两条结论：
+
+1. **deep-think 不比 search 贵**（单搜索≈¥0.004 vs ¥0.005），且省本地上下文（你读 8 条摘要的成本远高于 DeepSeek 的 token）。选型看延迟、确定性与是否需要结构化结果，不是看单价差。
+2. **真正的成本乘数是步数**：20 步上限下最坏可达 ¥0.15–0.3/次（典型 ¥0.01）。所以「别把模糊问题扔进 deep-think」比任何参数都省。
+
+### 真正省钱的开关（别搞错）
+
+| 开关 | 省钱？ | 说明 |
+| --- | --- | --- |
+| 不调工具（`no_search`） | ✅ 100% | 不需要外部信息就别联网 |
+| 排到空闲时段 | ✅ 50% | 见上 |
+| `--effort low` | ✅ 实测 −36% | 核对类问题用；多跳/综述用 `high` |
+| `--max-tokens N` | ✅ 限生成量 | 输出 4 元/M，砍一半输出≈省 20–30% |
+| 多轮用 `chat` + 最小历史 | ✅ 3–7 倍 | 别用 `responses` 带长历史 |
+| `--brief` / `--max-answer-chars` / 默认视图 | ❌ 不省 | 只省**你的上下文**，billing 是模型生成量 |
+| 重试 / 追加 deep-think | ❌ 翻倍 | 失败只降级一次 `search` |
+
+### 选型（最省原则）
 
 | 场景 | 最省做法 |
 | --- | --- |
-| 已知一个 URL，要摘要/原文 | `fetch`（一次 ¥0.005） |
+| 已知一个 URL，要摘要/原文 | `fetch`（¥0.005，有缓存） |
 | 找候选链接、快速摸底 | `search`（`need_content=false`） |
-| 多步交叉验证、边想边查 | `deep-think`（服务端搜索免费，只付推理 token） |
+| 单点事实，且想要引用 + 省本地上下文 | `deep-think --effort low` |
+| 多步交叉验证、边想边查 | `deep-think`（服务端搜索免费，只付 token） |
 | 离线采集/自定义排序 | `search` + `fetch`（缓存复用） |
+
+省 `search`/`fetch`：默认不开 `--need-content`；一次 `--count 8` 优于 4 次 `--count 2`；同一 URL 靠缓存；一轮 fetch ≤3 URL。
+
+省 `deep-think`：一次问清、缩小范围；`--effort` 按需降；`--max-tokens` 限输出；多轮只带必要历史；`--dry-run` 先看请求体；每次看 stderr 的 `input/cache_read/output/thinking` 与 `server_tool_use` 计数，步数暴涨是最早的预警。
 
 ## 产物位置
 
 运行期文件**只写本 skill 目录内部**：`.cache/fetch/`（fetch 缓存）、`.cache/deep-think/`（`history.json` 状态、`deep-think.log.jsonl` 日志、`raw/` 原始响应 dump）。目录不可写时直接报错，不回退到系统临时目录。清理：`rm -rf .cache/`。
+
+`deepseek-peak.sh` 不写任何文件、不联网（只读系统时间）。
 
 ## 需要原始细节时
 

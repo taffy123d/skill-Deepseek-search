@@ -825,6 +825,46 @@ class TestPayload(unittest.TestCase):
         self.assertNotIn("Authorization", messages)
         self.assertEqual(dt.masked_headers(chat)["Authorization"], "***")
 
+    def test_effort_default_is_high(self):
+        self.assertEqual(dt.build_payload("chat", "m", [])["reasoning_effort"], "high")
+        self.assertEqual(dt.build_payload("messages", "m", [])["output_config"], {"effort": "high"})
+        self.assertEqual(dt.build_payload("responses", "m", [])["reasoning"], {"effort": "high"})
+
+    def test_effort_low_per_protocol(self):
+        # 官方 guides/thinking_mode：三协议传参位置不同
+        chat = dt.build_payload("chat", "m", [], effort="low")
+        self.assertEqual(chat["reasoning_effort"], "low")
+        self.assertNotIn("output_config", chat)
+        messages = dt.build_payload("messages", "m", [], effort="low")
+        self.assertEqual(messages["output_config"], {"effort": "low"})
+        self.assertNotIn("reasoning_effort", messages)
+        responses = dt.build_payload("responses", "m", [], effort="low")
+        self.assertEqual(responses["reasoning"], {"effort": "low"})
+
+    def test_converge_chat_prepends_system_without_mutating_items(self):
+        items = [{"role": "user", "content": "q"}]
+        payload = dt.build_payload("chat", "m", items, converge=True)
+        self.assertEqual(payload["messages"][0]["role"], "system")
+        self.assertEqual(payload["messages"][1], {"role": "user", "content": "q"})
+        self.assertEqual(items, [{"role": "user", "content": "q"}])  # 原列表未被改
+
+    def test_converge_messages_uses_top_level_system(self):
+        payload = dt.build_payload("messages", "m", [{"role": "user", "content": "q"}], converge=True)
+        self.assertEqual(payload["system"], dt.CONVERGE_PROMPT)
+        self.assertEqual(payload["messages"], [{"role": "user", "content": "q"}])
+
+    def test_converge_responses_uses_instructions(self):
+        payload = dt.build_payload("responses", "m", [{"role": "user", "content": "q"}], converge=True)
+        self.assertEqual(payload["instructions"], dt.CONVERGE_PROMPT)
+
+    def test_converge_off_by_default(self):
+        self.assertNotIn("system", dt.build_payload("messages", "m", []))
+        self.assertNotIn("instructions", dt.build_payload("responses", "m", []))
+        self.assertEqual(
+            [m["role"] for m in dt.build_payload("chat", "m", [{"role": "user", "content": "q"}])["messages"]],
+            ["user"],
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 错误映射

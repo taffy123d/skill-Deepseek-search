@@ -50,6 +50,18 @@ PROTOCOLS = {
 DEFAULT_MODEL = "deepseek-flash"
 WEB_SEARCH_TOOL = "deepseek_web_search"
 
+# 思考强度：官方映射 low/high/max（默认 high）。low 更早收敛、更省 token，
+# 代价是复杂问题的推理深度下降。三协议传参位置不同，见 build_payload()。
+DEFAULT_EFFORT = "high"
+EFFORTS = ("low", "high", "max")
+
+# 可选的软收敛提示（--converge）：只是提示词，不限制步数（步数不可参数化）
+CONVERGE_PROMPT = (
+    "一旦已有足够信息回答问题，立即停止检索并作答；"
+    "若连续几步检索没有产生新的有效信息，直接基于现有证据给出结论，并注明不确定之处。"
+    "回答保持简洁。"
+)
+
 EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_API = 2
@@ -230,22 +242,33 @@ def append_log(path, record):
 # --------------------------------------------------------------------------- #
 # 请求构造
 # --------------------------------------------------------------------------- #
-def build_payload(protocol, model, items, stream=False, max_tokens=0):
-    """构造请求体。只放必要字段：model / 思考开关 / 单个联网工具 / 消息 / 流式开关。
+def build_payload(protocol, model, items, stream=False, max_tokens=0, effort=DEFAULT_EFFORT, converge=False):
+    """构造请求体。只放必要字段：model / 思考开关与强度 / 单个联网工具 / 消息 / 流式开关。
 
     硬约束（官方文档）：
       * 不传 tool_choice（联网工具不能被强制指定）；
       * 不传 allowed_domains / blocked_domains / user_location；
       * 不传 web_search_options / response_format / logprobs / top_logprobs；
+      * 不传 temperature / presence_penalty / frequency_penalty（思考模式下无效）；
       * 只声明一个 deepseek_web_search。
+
+    思考强度参数位置（官方 guides/thinking_mode）：
+      chat      -> 顶层 reasoning_effort
+      messages  -> output_config.effort
+      responses -> reasoning.effort
     """
+    messages = list(items or [])
     if protocol == "chat":
         payload = {
             "model": model,
             "thinking": {"type": "enabled"},
             "tools": [{"type": WEB_SEARCH_TOOL}],
-            "messages": items,
+            "messages": messages,
         }
+        if effort:
+            payload["reasoning_effort"] = effort
+        if converge:
+            payload["messages"] = [{"role": "system", "content": CONVERGE_PROMPT}] + messages
         if max_tokens:
             payload["max_tokens"] = int(max_tokens)
     elif protocol == "messages":
@@ -253,17 +276,23 @@ def build_payload(protocol, model, items, stream=False, max_tokens=0):
             "model": model,
             "thinking": {"type": "enabled"},
             "tools": [{"type": WEB_SEARCH_TOOL, "name": WEB_SEARCH_TOOL}],
-            "messages": items,
+            "messages": messages,
         }
+        if effort:
+            payload["output_config"] = {"effort": effort}
+        if converge:
+            payload["system"] = CONVERGE_PROMPT
         if max_tokens:
             payload["max_tokens"] = int(max_tokens)
     elif protocol == "responses":
         payload = {
             "model": model,
-            "reasoning": {"effort": "high"},
+            "reasoning": {"effort": effort or DEFAULT_EFFORT},
             "tools": [{"type": WEB_SEARCH_TOOL}],
-            "input": items,
+            "input": messages,
         }
+        if converge:
+            payload["instructions"] = CONVERGE_PROMPT
         if max_tokens:
             payload["max_output_tokens"] = int(max_tokens)
     else:
@@ -1279,7 +1308,9 @@ def run(args):
             "请用同一协议继续（或换一个新的状态文件）" % (history_meta["protocol"], args.protocol)
         )
     items = build_items(history, question, args.protocol)
-    payload = build_payload(args.protocol, args.model, items, args.stream, args.max_tokens)
+    payload = build_payload(
+        args.protocol, args.model, items, args.stream, args.max_tokens, args.effort, args.converge
+    )
     url = API_BASE + PROTOCOLS[args.protocol]
 
     if args.dry_run:
@@ -1375,7 +1406,13 @@ EPILOG = """\
 产物位置：历史/日志/原始 dump 一律写在 <skill>/.cache/deep-think/ 下。
 
 计费：服务端搜索与抓取不计费，只计模型 token（含思考 token）。
-      每步思考与工具结果都进上下文 -> 问题越模糊步数越多、越贵；先用 --dry-run 看请求体。
+      步数由模型自决（上限约 20），**没有**限步参数；能调的只有：
+        --effort low        思考链更短、更早收敛（默认 high，实测同题省 ~36%）
+        --converge          加软收敛提示（够用即停）
+        --max-tokens N      限输出长度（--brief / --max-answer-chars 不省钱）
+      另外：模型 token 分峰谷，高峰是空闲的 2 倍；
+        先跑 deepseek-peak.sh 看时段，不急的活排到空闲时段。
+      问题越模糊步数越多、越贵；先用 --dry-run 看请求体。
 
 退出码：0 成功 / 1 参数或配置错误 / 2 接口或网络错误
 """
@@ -1403,6 +1440,13 @@ def build_parser():
     g.add_argument("--protocol", default="chat", choices=sorted(PROTOCOLS), help="默认 chat")
     g.add_argument("--model", default=DEFAULT_MODEL, help="服务端模型（默认 %s）" % DEFAULT_MODEL)
     g.add_argument("--stream", action="store_true", help="使用 SSE 流式响应（默认非流式，最稳）")
+    g.add_argument(
+        "--effort",
+        default=DEFAULT_EFFORT,
+        choices=list(EFFORTS),
+        help="思考强度（默认 %s）：low 更早收敛、更省 token，复杂问题质量可能下降" % DEFAULT_EFFORT,
+    )
+    g.add_argument("--converge", action="store_true", help="加一段软收敛提示（够用即停、连续无新信息就收尾）")
     g.add_argument("--max-tokens", type=int, default=0, help="输出上限（responses 协议映射为 max_output_tokens；0=不传）")
 
     v = parser.add_argument_group("输出视图")

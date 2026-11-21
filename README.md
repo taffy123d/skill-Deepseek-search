@@ -1,6 +1,6 @@
 # deepseek-search
 
-基于 [DeepSeek 网页搜索与抓取 API](https://api-docs.deepseek.com/zh-cn/guides/search) 与 [联网工具（服务端深度思考搜索）](https://api-docs.deepseek.com/zh-cn/guides/web_tools) 的 Claude / pi skill。提供三件事：实时网页搜索、网页正文抓取、多步深度思考搜索（服务端自主检索并带引用作答）。内置「先摘要、按需精读、证据不足再升级」的检索流程。
+基于 [DeepSeek 网页搜索与抓取 API](https://api-docs.deepseek.com/zh-cn/guides/search) 与 [联网工具（服务端深度思考搜索）](https://api-docs.deepseek.com/zh-cn/guides/web_tools) 的 Claude / pi skill。提供四件事：实时网页搜索、网页正文抓取、多步深度思考搜索（服务端自主检索并带引用作答）、峰谷计费时段判断。内置「先摘要、按需精读、证据不足再升级」的检索流程。
 
 ## 文件结构
 
@@ -10,10 +10,13 @@
 ├── scripts/
 │   ├── deepseek_search.py        # search / fetch 主体实现（Python 3 标准库）
 │   ├── deepseek_deep_think.py    # 深度思考搜索（方案 A，独立实现，不依赖上一个）
-│   ├── deepseek-search.sh        # 兼容包装器（首参 deep-think 时转发）
+│   ├── deepseek_peak.py          # 峰谷时段判断（只读系统时间，跨平台）
+│   ├── deepseek-search.sh        # 兼容包装器（首参 deep-think / peak 时转发）
 │   ├── deepseek-deep-think.sh    # 深度思考搜索专用包装器
+│   ├── deepseek-peak.sh          # 峰谷判断包装器
 │   ├── selftest.py               # search / fetch 离线自测
-│   └── selftest_deep_think.py    # deep-think 离线自测
+│   ├── selftest_deep_think.py    # deep-think 离线自测
+│   └── selftest_peak.py          # 峰谷判断离线自测
 ├── .cache/fetch/                 # fetch 缓存（自动生成，已 gitignore）
 ├── .cache/deep-think/            # 历史状态 / 日志 / 原始响应 dump（已 gitignore）
 ├── DeepSeek_API_Key              # API 密钥（本地文件，已被 .gitignore 忽略）
@@ -64,6 +67,12 @@ bash scripts/deepseek-deep-think.sh "追问" \
 
 # 免费自检：只打印请求体，不调用 API
 bash scripts/deepseek-deep-think.sh "问题" --dry-run
+
+# 峰谷时段：不急的批量活排到空闲时段，单价直接减半
+bash scripts/deepseek-peak.sh
+bash scripts/deepseek-peak.sh --json
+bash scripts/deepseek-peak.sh --check          # 0=空闲 / 2=高峰
+bash scripts/deepseek-peak.sh --at "2026-11-23 10:30"   # 假设时刻，便于排期
 ```
 
 也支持 `python3 scripts/deepseek_search.py ...` 直接调用。两个入口的 `--help` 各自独立：`deepseek-search.sh --help` 只讲 search/fetch，deep-think 的完整参数与四层路由提示在 `deepseek-deep-think.sh --help`。
@@ -162,6 +171,8 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 | --- | --- |
 | `--protocol chat\|messages\|responses` | 对话协议，默认 `chat`（`/chat/completions`） |
 | `--model` | 服务端模型，默认 `deepseek-flash` |
+| `--effort low\|high\|max` | 思考强度，默认 `high`；`low` 更早收敛、实测省 ~36%，复杂问题质量可能下降 |
+| `--converge` | 加软收敛提示（够用即停、连续无新信息就收尾），默认关 |
 | `--stream` | SSE 流式（默认非流式，最稳） |
 | `--brief` / `--summary` / `--verbose` | 只留正文 / 加一行检索轨迹 / 诊断视图（互斥） |
 | `--json` | 结构化输出，默认 `{"answer","citations"}` |
@@ -188,19 +199,55 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 ### 请求约束（脚本已固化）
 
 - 模型默认 `deepseek-flash`；开启思考（`thinking.type=enabled` / `reasoning.effort=high`）即「深度思考搜索」。
+- 思考强度三协议传参位置不同（官方 `guides/thinking_mode`）：`chat` → 顶层 `reasoning_effort`；`messages` → `output_config.effort`；`responses` → `reasoning.effort`。
 - `tools` 只声明一个 `deepseek_web_search`（Messages 协议带 `name`）。
 - **不发送** `tool_choice`、`allowed_domains`、`blocked_domains`、`user_location`、`web_search_options`、`response_format`、`logprobs`。
 - 服务端最多约 20 次工具调用（`search` / `open_page` / `find_in_page`）。
 
-### 计费
+### 计费与时段
 
 服务端搜索与抓取**不计费**，只计模型 token（`input_tokens`、`cache_read_input_tokens`、`output_tokens`，其中 `thinking_tokens` 也算输出）。脚本从不调用 `/v1/tools/search`、`/v1/tools/fetch`，因此不产生按次搜索费。`usage.server_tool_use` 只是计数，不是账单项。
+
+`deepseek-flash` 单价（元/百万 tokens）：
+
+| 项目 | 空闲 | 高峰 |
+| --- | --- | --- |
+| 输入·缓存命中 | 0.02 | 0.04 |
+| 输入·未命中 | 1 | 2 |
+| 输出（含思考） | 4 | 8 |
+
+高峰 = 北京时间周一至周五 09:00–12:00、14:00–18:00（不含法定节假日），其余时间半价。用 `scripts/deepseek-peak.sh` 判断当前时段。
+
+实测（空闲时段）：单搜索 ¥0.0042–0.0049；多跳 `high` ¥0.0142 / `low` ¥0.0091；无需检索 ¥0.0011；多轮追问 chat +¥0.0023 / responses +¥0.0078。**步数是最强乘数**（20 步上限下最坏可达 ¥0.15–0.3/次）。
+
+注意：`--brief` / `--max-answer-chars` / 默认视图裁剪**只省本地上下文，不省钱**；真正省钱的是 `--effort low`、`--max-tokens`、少带历史、不重试。
 
 ### 产物
 
 全部写在 `<skill>/.cache/deep-think/`：`history.json`（多轮状态，原样保留 `kind`/`signature`/`server_tool_calls`）、`deep-think.log.jsonl`（每次一行 usage 与耗时）、`raw/`（`--dump-raw` 的原始响应）。目录不可写直接报错，不回退到系统临时目录。
 
 状态文件与协议绑定：`--protocol chat` 写的状态不能拿去跑 `--protocol responses`（本地直接报错 `exit 1`，不会发请求白花 token）。
+
+## 峰谷时段判断（peak）
+
+官方规则：北京时间周一至周五 09:00–12:00、14:00–18:00 为高峰，其余时间（含周末、节假日全天）为空闲；**空闲单价是高峰的一半**。
+
+```bash
+bash scripts/deepseek-peak.sh                          # 空闲 ×1 | 2026-11-21 21:56 CST 周六 | 下次切换 …
+bash scripts/deepseek-peak.sh --json                   # 结构化，含单价与下次切换秒数
+bash scripts/deepseek-peak.sh --next 3                 # 接下来 3 次切换
+bash scripts/deepseek-peak.sh --check                  # 0=空闲 / 2=高峰
+bash scripts/deepseek-peak.sh --at "2026-11-23 10:30"  # 假设时刻（排期用）
+bash scripts/deepseek-peak.sh --holidays 2026-10-01,2026-10-02
+bash scripts/deepseek-search.sh peak                   # 等价写法
+```
+
+| 特点 | 说明 |
+| --- | --- |
+| 跨平台 | 纯 Python 标准库，时区固定 UTC+8（中国无夏令时），macOS / Linux / Windows 行为一致；Windows 用 `python scripts\deepseek_peak.py` |
+| 不联网、不写文件 | 只读系统时间 |
+| 节假日 | **不内置**（每年变动，写死容易错）：默认把假日当工作日，判断偏保守（高估成本）；用 `--holidays` 或 `DEEPSEEK_PEAK_HOLIDAYS` 精确化 |
+| 退出码 | `0` 正常 / `1` 参数错误 / `2` 仅 `--check` 表示高峰 |
 
 ## 缓存
 
@@ -233,7 +280,8 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 
 ```bash
 python3 scripts/selftest.py             # 95 个离线用例：去重/过滤/排序/截断/摘录/缓存/重试
-python3 scripts/selftest_deep_think.py  # 70 个离线用例：三协议解析/流式累积/视图/请求体/错误映射/状态往返
+python3 scripts/selftest_deep_think.py  # 76 个离线用例：三协议解析/流式累积/视图/请求体/错误映射/状态往返
+python3 scripts/selftest_peak.py        # 22 个离线用例：峰谷判定/下次切换/节假日/JSON/退出码
 ```
 
 ## 说明
@@ -242,4 +290,5 @@ python3 scripts/selftest_deep_think.py  # 70 个离线用例：三协议解析/�
 - `rerank_score ≥ 1.5` 为优质结果，`authority ≥ 3` 为极权威来源。
 - 计费按「成功请求次数」（Search / Fetch 各 5 元 / 1000 次），与 `count` 无关：一次多拿结果更省钱。
 - `deep-think` 的服务端搜索/抓取不计费，只付模型 token；`server_tool_use` 计数仅作观测。
+- 模型 token 分峰谷：工作日 09:00–12:00 / 14:00–18:00（北京时间）为高峰，其余时段半价；`deepseek-peak.sh` 可直接判断。
 - 字段/语法/错误码/QPS 以[官方文档](https://api-docs.deepseek.com/zh-cn/guides/search)与[联网工具文档](https://api-docs.deepseek.com/zh-cn/guides/web_tools)为准（代码里不做静态副本，避免过期）。
