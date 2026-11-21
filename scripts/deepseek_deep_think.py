@@ -1416,8 +1416,16 @@ def build_parser():
     v.add_argument("--thinking-chars", type=int, default=DEFAULT_THINKING_CHARS, help="--verbose 时每步思考保留的字符数")
 
     s = parser.add_argument_group("多轮状态（skill 私有，不是给 agent 的返回值）")
-    s.add_argument("--history", default=None, help="读取历史状态文件（默认路径 %s）" % DEFAULT_HISTORY)
-    s.add_argument("--save-history", default=None, help="成功后写回历史状态（默认路径 %s）" % DEFAULT_HISTORY)
+    s.add_argument(
+        "--history",
+        default=None,
+        help="读取历史状态文件（需显式路径，建议与 --save-history 用同一文件，如 %s）" % DEFAULT_HISTORY,
+    )
+    s.add_argument(
+        "--save-history",
+        default=None,
+        help="成功后写回历史状态（需显式路径，建议与 --history 用同一文件，如 %s）" % DEFAULT_HISTORY,
+    )
 
     d = parser.add_argument_group("产物与调试（默认都写在 <skill>/.cache/deep-think/ 下）")
     d.add_argument("--log", nargs="?", const=DEFAULT_LOG, default=None, help="追加 JSONL 日志（默认 %s）" % DEFAULT_LOG)

@@ -66,7 +66,7 @@ bash scripts/deepseek-deep-think.sh "追问" \
 bash scripts/deepseek-deep-think.sh "问题" --dry-run
 ```
 
-也支持 `python3 scripts/deepseek_search.py ...` 直接调用。
+也支持 `python3 scripts/deepseek_search.py ...` 直接调用。两个入口的 `--help` 各自独立：`deepseek-search.sh --help` 只讲 search/fetch，deep-think 的完整参数与四层路由提示在 `deepseek-deep-think.sh --help`。
 
 ### 搜索语法 flag
 
@@ -233,7 +233,7 @@ bash scripts/deepseek-deep-think.sh "<一个可独立表述的检索目标>" [�
 
 ```bash
 python3 scripts/selftest.py             # 95 个离线用例：去重/过滤/排序/截断/摘录/缓存/重试
-python3 scripts/selftest_deep_think.py  # 68 个离线用例：三协议解析/流式累积/视图/请求体/错误映射/状态往返
+python3 scripts/selftest_deep_think.py  # 70 个离线用例：三协议解析/流式累积/视图/请求体/错误映射/状态往返
 ```
 
 ## 说明

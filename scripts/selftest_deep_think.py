@@ -730,6 +730,16 @@ class TestViews(unittest.TestCase):
     def test_citation_cap(self):
         self.assertEqual(len(dt.normalize_citations(self.result.citations, 1)), 1)
 
+    def test_citation_cap_zero_means_unlimited(self):
+        self.assertEqual(len(dt.normalize_citations(self.result.citations, 0)), 2)
+
+    def test_help_mentions_four_routes(self):
+        # 验收要求：--help 里能看到四层路由的简要提示
+        text = dt.build_parser().format_help()
+        for route in ("no_search", "only_search", "search_and_fetch_once", "deep_think"):
+            self.assertIn(route, text)
+        self.assertIn("计费", text)
+
     def test_trace_summary(self):
         self.assertEqual(dt.trace_summary(self.result.steps), "搜索1次，打开1页，页内查找1次")
         self.assertEqual(dt.trace_summary([]), "未使用检索工具")

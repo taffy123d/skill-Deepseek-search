@@ -44,6 +44,7 @@ bash scripts/deepseek-deep-think.sh "<问题>" [选项]            # 深度思�
 ```
 
 完整参数：加 `--help`（不调用 API、不花钱）。`--dry-run` 打印将要发送的请求体，同样免费。
+两个入口的 `--help` 各自独立：`deepseek-search.sh --help` 只讲 search/fetch，deep-think 用 `deepseek-deep-think.sh --help`（含四层路由提示）。
 
 ---
 
