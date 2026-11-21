@@ -6,6 +6,8 @@
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -49,6 +51,20 @@ class TestUrlNormalization(unittest.TestCase):
         a = ds.normalize_url("https://a.com/p?id=1")
         b = ds.normalize_url("https://a.com/p?id=2")
         self.assertNotEqual(a, b)
+
+    def test_locale_variants_collapse(self):
+        self.assertEqual(ds.normalize_url("https://a.com/zh-cn/x"), "https://a.com/x")
+        self.assertEqual(
+            ds.normalize_url("https://a.com/zh-cn/x"), ds.normalize_url("https://a.com/en/x")
+        )
+        self.assertEqual(ds.normalize_url("https://a.com/zh-cn"), "https://a.com")
+
+    def test_locale_only_in_middle_path_not_touched(self):
+        self.assertEqual(ds.normalize_url("https://a.com/docs/en/x"), "https://a.com/docs/en/x")
+
+    def test_dedupe_merges_locale_variants(self):
+        items = [make_item("https://a.com/zh-cn/x"), make_item("https://a.com/en/x")]
+        self.assertEqual(len(ds.dedupe_results(items)), 1)
 
     def test_empty(self):
         self.assertEqual(ds.normalize_url(""), "")
@@ -244,10 +260,235 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("…", text)
         self.assertNotIn("z" * 101, text)
 
+    def test_strip_leading_title_variants(self):
+        self.assertEqual(ds.strip_leading_title("# T\n\n正文", "T"), "正文")
+        self.assertEqual(ds.strip_leading_title("# T - 站点\n\n正文", "T"), "正文")
+        self.assertEqual(ds.strip_leading_title("# T\n\n正文", "T - T"), "正文")
+        # 同一标题重复出现两次（有些站点 H1 + 正文首标题重复）
+        self.assertEqual(ds.strip_leading_title("# T\n\n# T\n\n正文", "T"), "正文")
+        # 标题不同则保留（可能是正文里的二级标题）
+        self.assertEqual(ds.strip_leading_title("# Other\n\n正文", "T"), "# Other\n\n正文")
+        self.assertEqual(ds.strip_leading_title("正文无标题", "T"), "正文无标题")
+
     def test_fetch_text_single_and_multi(self):
         doc = {"url": "https://a.com/1", "title": "标题", "content": "正文", "cached": False}
         self.assertTrue(ds.format_fetch_text(doc).startswith("# 标题"))
         self.assertIn("## [2/3]", ds.format_fetch_text(dict(doc, title="T2"), 2, 3))
+
+
+def run_cli(argv, payload=None):
+    """在测试进程中跑 run_search / run_fetch，打桩 api_post 与密钥解析。"""
+    orig_post, orig_key = ds.api_post, ds.resolve_key
+    calls = []
+
+    def fake_post(kind, body, timeout, key):
+        calls.append((kind, body))
+        if isinstance(payload, Exception):
+            raise payload
+        if callable(payload):
+            return payload(kind, body)
+        return payload
+
+    ds.api_post = fake_post
+    ds.resolve_key = lambda path=None: "test-key"
+    out, errbuf = io.StringIO(), io.StringIO()
+    try:
+        args = ds.build_parser().parse_args(argv)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errbuf):
+            try:
+                code = ds.run_search(args) if args.cmd == "search" else ds.run_fetch(args)
+            except (ds.ApiError, ds.NetworkError, ds.UsageError, ds.ConfigError) as exc:
+                code = "raised:%s" % type(exc).__name__
+        return code, out.getvalue(), errbuf.getvalue(), calls
+    finally:
+        ds.api_post, ds.resolve_key = orig_post, orig_key
+
+
+def search_payload(*items):
+    return {"results": list(items)}
+
+
+class TestRunSearchFlow(unittest.TestCase):
+    def test_empty_results_message(self):
+        code, out, _, _ = run_cli(["search", "q"], search_payload())
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertEqual(out.strip(), "No matching results.")
+
+    def test_fallback_when_everything_filtered_out(self):
+        payload = search_payload(make_item("https://a.com/1", score=1.0, authority=1))
+        code, out, errbuf, _ = run_cli(["search", "q", "--min-score", "3"], payload)
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("回退", errbuf)
+        self.assertIn("[1] t:https://a.com/1", out)  # 回退后仍然展示
+
+    def test_footer_reports_filters(self):
+        payload = search_payload(
+            make_item("https://a.com/1", score=2.5),
+            make_item("https://a.com/1/#dup", score=2.4),
+            make_item("https://a.com/2", score=0.5),
+        )
+        code, out, _, _ = run_cli(["search", "q", "--min-score", "1.5"], payload)
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("显示 1 / 3 条", out)
+        self.assertIn("去重 1", out)
+        self.assertIn("低分 1", out)
+
+    def test_footer_reports_limit(self):
+        payload = search_payload(*[make_item("https://a.com/%d" % i) for i in range(4)])
+        code, out, _, _ = run_cli(["search", "q", "--limit", "2"], payload)
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("受 --limit 2 限制", out)
+
+    def test_json_output_shape(self):
+        payload = search_payload(make_item("https://a.com/1", score=2.5))
+        code, out, _, _ = run_cli(["search", "q", "--json"], payload)
+        self.assertEqual(code, ds.EXIT_OK)
+        obj = json.loads(out)
+        self.assertEqual(obj["count"], 1)
+        self.assertEqual(obj["results"][0]["url"], "https://a.com/1")
+        self.assertEqual(obj["stats"]["raw"], 1)
+
+    def test_raw_output_is_untouched(self):
+        payload = search_payload(make_item("https://a.com/1", score=0.2))
+        code, out, _, _ = run_cli(["search", "q", "--raw", "--min-score", "1.5"], payload)
+        self.assertEqual(json.loads(out), payload)
+
+    def test_need_content_prints_content_block(self):
+        payload = search_payload(make_item("https://a.com/1", content="正文片段"))
+        code, out, _, _ = run_cli(["search", "q", "--need-content", "--max-content", "10"], payload)
+        self.assertIn("Content:   正文片段", out)
+
+    def test_sends_need_content_false_by_default(self):
+        _, _, _, calls = run_cli(["search", "q"], search_payload())
+        self.assertEqual(calls[0][0], "search")
+        self.assertFalse(calls[0][1]["need_content"])
+        self.assertNotIn("ori_question", calls[0][1])
+
+    def test_passes_ori_question_and_count(self):
+        _, _, _, calls = run_cli(
+            ["search", "q", "--count", "7", "--ori-question", "原问题"], search_payload()
+        )
+        self.assertEqual(calls[0][1]["count"], 7)
+        self.assertEqual(calls[0][1]["ori_question"], "原问题")
+
+
+class TestRunFetchFlow(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ds-fetchtest-")
+        self.base = ["fetch", "--cache-dir", self.dir, "--delay", "0"]
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_single_url_success_and_cache_written(self):
+        payload = {"title": "标题", "content": "# 标题\n\n正文第一段\n\n正文第二段"}
+        code, out, _, _ = run_cli(self.base + ["https://a.com/1"], payload)
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertTrue(out.startswith("# 标题"))
+        self.assertNotIn("# 标题\n\n正文第一段", out)  # 开头重复标题被去掉
+        self.assertIn("正文第一段", out)
+        self.assertTrue(os.path.isfile(ds.cache_path(self.dir, "https://a.com/1")))
+
+    def test_cache_hit_skips_api_call(self):
+        url = "https://a.com/cached"
+        ds.cache_write(ds.cache_path(self.dir, url), url, "缓存标题", "缓存正文")
+
+        def boom(kind, body):
+            raise AssertionError("缓存命中时不应该调用 API")
+
+        code, out, errbuf, _ = run_cli(self.base + [url], boom)
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("缓存正文", out)
+        self.assertIn("[缓存命中]", errbuf)
+        self.assertIn("Source: cache", out)
+
+    def test_no_cache_forces_api_call(self):
+        url = "https://a.com/cached2"
+        ds.cache_write(ds.cache_path(self.dir, url), url, "旧标题", "旧正文")
+        code, out, _, calls = run_cli(
+            self.base + [url, "--no-cache"], {"title": "新标题", "content": "新正文"}
+        )
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("新正文", out)
+
+    def test_partial_failure_exit_3(self):
+        def fake(kind, body):
+            if body["url"].endswith("bad"):
+                raise ds.ApiError(404, "no content")
+            return {"title": "ok", "content": "ok body"}
+
+        code, out, errbuf, _ = run_cli(self.base + ["https://a.com/bad", "https://a.com/good"], fake)
+        self.assertEqual(code, ds.EXIT_PARTIAL)
+        self.assertIn("ok body", out)
+        self.assertIn("[跳过]", errbuf)
+
+    def test_single_url_failure_raises(self):
+        code, _, _, _ = run_cli(self.base + ["https://a.com/bad"], ds.ApiError(403, "blocked"))
+        self.assertEqual(code, "raised:ApiError")
+
+    def test_empty_content_is_failure(self):
+        code, _, _, _ = run_cli(self.base + ["https://a.com/empty"], {"title": "t", "content": "   "})
+        self.assertEqual(code, "raised:ApiError")
+
+    def test_keywords_excerpt_applied(self):
+        content = "开头段落\n\n无关内容\n\n这里讲价格\n\n后续段落\n\n完全无关"
+        code, out, _, _ = run_cli(self.base + ["https://a.com/k", "--keywords", "价格"], {"title": "t", "content": content})
+        self.assertIn("这里讲价格", out)
+        self.assertIn("后续段落", out)  # pad=1 的下一段
+        self.assertNotIn("完全无关", out)
+
+    def test_max_chars_truncation(self):
+        code, out, _, _ = run_cli(
+            self.base + ["https://a.com/l", "--max-chars", "5"], {"title": "t", "content": "0123456789"}
+        )
+        self.assertIn("已截断", out)
+        self.assertIn("原文 10 字符", out)
+
+    def test_multiple_urls_numbered(self):
+        code, out, _, _ = run_cli(
+            self.base + ["https://a.com/1", "https://a.com/2"],
+            lambda kind, body: {"title": body["url"][-1], "content": "c" + body["url"][-1]},
+        )
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertIn("## [1/2]", out)
+        self.assertIn("## [2/2]", out)
+        self.assertIn("\n\n---\n\n", out)
+
+    def test_json_output_marks_truncated(self):
+        code, out, _, _ = run_cli(
+            self.base + ["https://a.com/j", "--max-chars", "3", "--json"],
+            {"title": "t", "content": "0123456789"},
+        )
+        obj = json.loads(out)
+        self.assertEqual(obj["count"], 1)
+        self.assertTrue(obj["results"][0]["truncated"])
+        self.assertEqual(obj["results"][0]["original_length"], 10)
+
+    def test_url_validation_rejects_bad_scheme(self):
+        code, _, _, calls = run_cli(self.base + ["ftp://a.com/x"], {})
+        self.assertEqual(code, "raised:UsageError")
+        self.assertEqual(calls, [])
+
+    def test_duplicate_urls_deduped(self):
+        code, _, _, calls = run_cli(
+            self.base + ["https://a.com/x", "https://a.com/x"], {"title": "t", "content": "c"}
+        )
+        self.assertEqual(code, ds.EXIT_OK)
+        self.assertEqual(len(calls), 1)
+
+
+class TestKeyResolution(unittest.TestCase):
+    def test_env_var_used_when_present(self):
+        os.environ["DEEPSEEK_API_KEY"] = "env-key-123"
+        try:
+            self.assertEqual(ds.resolve_key(), "env-key-123")
+        finally:
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+
+    def test_missing_explicit_file_raises(self):
+        with self.assertRaises(ds.ConfigError):
+            ds.resolve_key("/nonexistent/DeepSeek_API_Key")
 
 
 if __name__ == "__main__":

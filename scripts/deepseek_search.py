@@ -235,6 +235,8 @@ _TRACKING_RE = re.compile(
     re.I,
 )
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+# 去重时把语言/地区路径前缀视作同一页面（/zh-cn/x 与 /en/x 视为重复）
+_LOCALE_SEGMENTS = {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant", "en", "en-us", "en-gb", "ja", "ko"}
 _PARA_RE = re.compile(r"\n\s*\n")
 
 
@@ -262,7 +264,11 @@ def normalize_url(url):
         u = base + "?" + "&".join(kept) if kept else base
     if "://" in u:
         scheme, rest = u.split("://", 1)
-        u = scheme + "://" + rest.rstrip("/")
+        rest = rest.rstrip("/")
+        head, sep, tail = rest.partition("/")
+        if sep and tail.split("/", 1)[0].lower() in _LOCALE_SEGMENTS:
+            rest = head + "/" + tail.split("/", 1)[-1] if "/" in tail else head
+        u = scheme + "://" + rest
     return u
 
 
@@ -338,17 +344,32 @@ def truncate(text, limit):
     return text[:limit].rstrip() + TRUNC_MARK.format(total=len(text))
 
 
+def _title_key(text):
+    """把标题压成可比较的形式：折叠空白，丢掉"标题 - 站点"式的后缀。"""
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    for sep in (" - ", " | ", " — ", " – ", " _ ", "｜", "—"):
+        t = t.split(sep)[0].strip()
+    return t
+
+
 def strip_leading_title(content, title):
     """去掉正文开头与页面标题重复的一级标题，省 token。"""
     if not content or not title:
         return content
     lines = content.lstrip("\n").split("\n")
-    if not lines:
+    want = _title_key(title)
+    if not want:
         return content
-    first = lines[0].strip()
-    if first.startswith("#") and first.lstrip("#").strip() == (title or "").strip():
-        return "\n".join(lines[1:]).lstrip("\n")
-    return content
+    while lines:
+        first = lines[0].strip()
+        if not first.startswith("#"):
+            break
+        if _title_key(first.lstrip("#")) != want:
+            break
+        lines = lines[1:]
+        while lines and not lines[0].strip():  # 连带吃掉空行
+            lines = lines[1:]
+    return "\n".join(lines).lstrip("\n")
 
 
 def split_keywords(values):
@@ -709,6 +730,7 @@ def run_fetch(args):
         body = strip_leading_title(content, title)
         if keywords:
             body = excerpt(body, keywords, pad)
+        was_truncated = bool(max_chars and max_chars > 0 and len(body) > max_chars)
         body = truncate(body, max_chars)
         docs.append(
             {
@@ -718,6 +740,7 @@ def run_fetch(args):
                 "content_raw": content,
                 "raw_length": len(content),
                 "cached": cached,
+                "truncated": was_truncated,
             }
         )
 
@@ -734,7 +757,7 @@ def run_fetch(args):
                         "content": d["content"],
                         "cached": d["cached"],
                         "original_length": d["raw_length"],
-                        "truncated": len(d["content"]) < len(d["content_raw"]) or d["raw_length"] > len(d["content"]),
+                        "truncated": d["truncated"],
                     }
                     for d in docs
                 ],
