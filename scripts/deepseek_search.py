@@ -465,11 +465,32 @@ def dump_json(obj):
 # 缓存（key = url）
 # --------------------------------------------------------------------------- #
 def cache_root(cli_dir=None):
-    return (
-        cli_dir
-        or os.environ.get("DEEPSEEK_SEARCH_CACHE")
-        or os.path.join(tempfile.gettempdir(), "deepseek-search-cache")
-    )
+    """缓存根目录：--cache-dir > DEEPSEEK_SEARCH_CACHE > <skill>/.cache/fetch。"""
+    if cli_dir:
+        return cli_dir
+    env = os.environ.get("DEEPSEEK_SEARCH_CACHE")
+    if env:
+        return env
+    return os.path.join(SKILL_ROOT, ".cache", "fetch")
+
+
+def prepare_cache_dir(directory, explicit=False):
+    """确保缓存目录可用；非显式指定的目录不可写时回退到系统临时目录。"""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        if not os.access(directory, os.W_OK | os.X_OK):
+            raise OSError("目录不可写")
+        return directory
+    except OSError as exc:
+        if explicit:
+            raise UsageError("缓存目录不可用（%s）：%s" % (exc, directory))
+        fallback = os.path.join(tempfile.gettempdir(), "deepseek-search-cache")
+        warn("缓存目录 %s 不可用（%s），本次改用 %s" % (directory, exc, fallback))
+        try:
+            os.makedirs(fallback, exist_ok=True)
+        except OSError:
+            pass
+        return fallback
 
 
 def cache_path(directory, url):
@@ -682,7 +703,7 @@ def run_fetch(args):
         return EXIT_OK
 
     api_key = resolve_key(args.key_file)
-    directory = cache_root(args.cache_dir)
+    directory = prepare_cache_dir(cache_root(args.cache_dir), explicit=bool(args.cache_dir))
 
     docs = []
     failures = []
@@ -809,7 +830,11 @@ def add_cache(p):
     g = p.add_argument_group("fetch 缓存")
     g.add_argument("--no-cache", action="store_true", help="禁用读取缓存（仍然写入）")
     g.add_argument("--cache-ttl", default=86400, help="缓存有效期秒数，0 表示永不过期（默认 86400）")
-    g.add_argument("--cache-dir", default=None, help="缓存目录（默认 $TMPDIR/deepseek-search-cache）")
+    g.add_argument(
+        "--cache-dir",
+        default=None,
+        help="缓存目录（默认 <skill>/.cache/fetch；也可用环境变量 DEEPSEEK_SEARCH_CACHE）",
+    )
 
 
 class _Parser(argparse.ArgumentParser):

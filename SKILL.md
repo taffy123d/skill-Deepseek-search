@@ -74,7 +74,7 @@ bash scripts/deepseek-search.sh fetch "<URL1>" "<URL2>" --max-chars 8000 --keywo
 - 默认不开 `--need-content`；只有「必须一次拿全文」的离线采集才开。
 - 同一问题不要重复搜索：先看已有结果里有没有答案。
 - 一次 `--count 8` 优于 4 次 `--count 2`。
-- 同一 URL 不要重复 fetch（缓存默认 1 天；`--cache-ttl 0` 表示永不过期）。
+- 同一 URL 不要重复 fetch（缓存存于 `<skill>/.cache/fetch`，默认 1 天；`--cache-ttl 0` 表示永不过期）。
 - `--json` / `--raw` 只给程序化处理用，不要为了「看看结构」而多调用；`--dry-run` 可离线检查将要发送的请求。
 
 ## 需要原始细节时

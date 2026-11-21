@@ -11,6 +11,7 @@
 │   ├── deepseek_search.py      # 主体实现（Python 3 标准库，无第三方依赖）
 │   ├── deepseek-search.sh      # 兼容包装器（旧调用方式仍可用）
 │   └── selftest.py             # 离线自测（不访问网络）
+├── .cache/fetch/               # fetch 缓存（自动生成，已 gitignore，可随时删）
 ├── DeepSeek_API_Key            # API 密钥（本地文件，已被 .gitignore 忽略）
 └── README.md                   # 本文件
 ```
@@ -76,7 +77,7 @@ bash scripts/deepseek-search.sh --help
 | `--keywords "a,b"` | 段落级关键词摘录（保留命中段 + 前后各 `--keyword-pad` 段，默认 1） |
 | `--delay 0.2` | 多 URL 之间的请求间隔（Fetch 有账号 25 QPS + 域名级 QPS 限制） |
 | `--fail-fast` | 任一 URL 失败立即退出（默认继续，最后 exit 3） |
-| `--no-cache` / `--cache-ttl SECONDS` / `--cache-dir DIR` | 缓存控制：默认按 url 缓存 1 天，`0` 表示永不过期 |
+| `--no-cache` / `--cache-ttl SECONDS` / `--cache-dir DIR` | 缓存控制：默认按 url 缓存 1 天，`0` 表示永不过期（`--no-cache` 只禁读、仍写入） |
 
 ### 输出模式
 
@@ -84,6 +85,14 @@ bash scripts/deepseek-search.sh --help
 - `--json`：处理后的结构化 JSON（含 `stats` 或 `failures`）。
 - `--raw`：接口原始响应。
 - `--dry-run`：只打印将要发送的 endpoint + payload，不发请求。
+
+## 缓存
+
+- 位置：`<skill>/.cache/fetch/`，文件名 = `sha256(url)[:20].json`，内容 `{fetched_at, url, title, content}`
+- 覆盖顺序：`--cache-dir` > 环境变量 `DEEPSEEK_SEARCH_CACHE` > `<skill>/.cache/fetch`
+- 有效期：默认 1 天（`--cache-ttl 0` 永不过期）；命中时 stderr 打印 `[缓存命中]`，**不发请求、不计费**
+- 项目目录只读时自动回退到 `$TMPDIR/deepseek-search-cache` 并告警；显式 `--cache-dir` 不可写则直接报错
+- 清理：`rm -rf .cache/fetch`（脚本只判断 TTL，不会自动删文件）
 
 ## 退出码
 

@@ -200,6 +200,49 @@ class TestCache(unittest.TestCase):
         self.assertIsNone(ds.cache_read(broken, 60))
 
 
+class TestCacheLocation(unittest.TestCase):
+    def test_default_dir_is_inside_skill(self):
+        prev = os.environ.pop("DEEPSEEK_SEARCH_CACHE", None)
+        try:
+            root = ds.cache_root()
+        finally:
+            if prev is not None:
+                os.environ["DEEPSEEK_SEARCH_CACHE"] = prev
+        self.assertEqual(root, os.path.join(ds.SKILL_ROOT, ".cache", "fetch"))
+        self.assertTrue(root.startswith(ds.SKILL_ROOT))
+
+    def test_cli_dir_wins(self):
+        self.assertEqual(ds.cache_root("/tmp/x"), "/tmp/x")
+
+    def test_env_override(self):
+        os.environ["DEEPSEEK_SEARCH_CACHE"] = "/tmp/env-cache"
+        try:
+            self.assertEqual(ds.cache_root(), "/tmp/env-cache")
+            self.assertEqual(ds.cache_root("/tmp/cli"), "/tmp/cli")
+        finally:
+            os.environ.pop("DEEPSEEK_SEARCH_CACHE", None)
+
+    def test_unwritable_default_falls_back_to_tmpdir(self):
+        with contextlib.redirect_stderr(io.StringIO()) as errbuf:
+            got = ds.prepare_cache_dir("/dev/null/nope")
+        self.assertIn("改用", errbuf.getvalue())
+        self.assertIn("deepseek-search-cache", got)
+
+    def test_unwritable_explicit_dir_raises(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(ds.UsageError):
+                ds.prepare_cache_dir("/dev/null/nope", explicit=True)
+
+    def test_prepare_creates_and_returns_dir(self):
+        d = tempfile.mkdtemp(prefix="ds-cachedir-")
+        try:
+            target = os.path.join(d, "a", "b")
+            self.assertEqual(ds.prepare_cache_dir(target), target)
+            self.assertTrue(os.path.isdir(target))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class TestRetry(unittest.TestCase):
     def setUp(self):
         self._orig_post = ds.http_post
