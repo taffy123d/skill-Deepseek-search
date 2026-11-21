@@ -8,7 +8,6 @@
 .
 ├── SKILL.md                    # skill 入口（含 frontmatter，供 agent 自动发现）
 ├── scripts/deepseek-search.sh  # 命令行工具
-├── deepseek-api-reference.md   # 完整 API 参考文档
 ├── DeepSeek_API_Key            # API 密钥（保持在此位置，勿外泄）
 └── README.md                   # 本文件
 ```
