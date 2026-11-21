@@ -1,1 +1,6 @@
 .DS_Store
+__pycache__/
+*.pyc
+DeepSeek_API_Key
+.cache/
+改进建议.md

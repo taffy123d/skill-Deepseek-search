@@ -1,40 +1,47 @@
 # deepseek-search
 
-基于 [DeepSeek 网页搜索与抓取 API](https://api-docs.deepseek.com/zh-cn/guides/web_search) 的 Claude/pi skill。提供实时网页搜索与网页正文抓取能力。
+基于 [DeepSeek 网页搜索与抓取 API](https://api-docs.deepseek.com/zh-cn/guides/search) 的 Claude / pi skill。提供实时网页搜索与网页正文抓取能力，并内置「先摘要、按需精读」的检索召回流程。
 
 ## 文件结构
 
 ```
 .
-├── SKILL.md                    # skill 入口（含 frontmatter，供 agent 自动发现）
-├── scripts/deepseek-search.sh  # 命令行工具
-├── DeepSeek_API_Key            # API 密钥（保持在此位置，勿外泄）
+├── SKILL.md                    # skill 入口：工作流 / 命令 / 边界规则（agent 自动发现）
+├── scripts/
+│   ├── deepseek_search.py      # 主体实现（Python 3 标准库，无第三方依赖）
+│   ├── deepseek-search.sh      # 兼容包装器（旧调用方式仍可用）
+│   └── selftest.py             # 离线自测（不访问网络）
+├── deepseek-api-reference.md   # 完整 API 速查（字段/语法/错误码/QPS/计费）
+├── DeepSeek_API_Key            # API 密钥（本地文件，已被 .gitignore 忽略）
 └── README.md                   # 本文件
 ```
 
 ## 依赖
 
-- bash 3.2+
-- curl
-- jq（`brew install jq`）
+- Python 3.7+（macOS 可用系统自带 `python3`；无需 curl / jq）
 
 ## 用法
 
 ```bash
-# 搜索（默认输出格式化文本）
-bash scripts/deepseek-search.sh search "DeepSeek V4 发布" --count 5 --need-content
+# 搜索：默认只返回摘要，本地去重/过滤/按权威重排
+bash scripts/deepseek-search.sh search "DeepSeek V4 发布" --count 5 --min-score 1.5 --sort authority
 
-# 搜索（原始 JSON 输出）
-bash scripts/deepseek-search.sh search "模型" --site github.com --after 2025 --json
+# 带上用户原问题，让搜索服务更懂意图
+bash scripts/deepseek-search.sh search "模型 定价" --ori-question "DeepSeek API 现在多少钱" --count 8
 
-# 抓取网页正文
-bash scripts/deepseek-search.sh fetch "https://example.com/article"
+# 抓取网页正文（可一次多个，自动截断 + 缓存）
+bash scripts/deepseek-search.sh fetch "https://example.com/a" "https://example.com/b" --max-chars 8000
 
-# 查看完整参数与搜索语法
+# 只摘录命中关键词的段落（含前后各 1 段）
+bash scripts/deepseek-search.sh fetch "https://example.com/very-long" --keywords "价格,限制"
+
+# 查看完整参数
 bash scripts/deepseek-search.sh --help
 ```
 
-### 常用搜索语法 flag
+也支持 `python3 scripts/deepseek_search.py ...` 直接调用。
+
+### 搜索语法 flag
 
 | flag | 作用 |
 | --- | --- |
@@ -46,20 +53,67 @@ bash scripts/deepseek-search.sh --help
 | `--lang zh,en` | 限定语言 |
 | `--after` / `--before` | 限定发布日期 |
 
-也支持直接在搜索词中写 `site:`、`lang:` 等原生操作符。
+也可以直接在 query 里写 `site:`、`lang:`、`after:` 等原生操作符。
+
+### 本地后处理（改进建议 步骤2）
+
+| flag | 作用 |
+| --- | --- |
+| `--min-score 1.5` | 丢弃 `rerank_score < 1.5` 的低质结果（默认 0 = 不过滤） |
+| `--min-authority 3` | 只保留 `authority >= 3` 的极权威来源（默认 -2 = 不过滤） |
+| `--sort rank\|score\|authority\|date` | 排序方式；`authority` = 权威 > 分数 > 日期（新在前） |
+| `--limit N` | 后处理后最多保留 N 条 |
+| `--no-dedupe` | 关闭 URL 去重（默认去重：忽略 fragment、尾斜杠、`utm_*` 等跟踪参数） |
+| `--max-summary N` | 每条摘要字符上限（默认 800，覆盖官方摘要长度，不再截到 400） |
+| `--max-content N` | `--need-content` 时正文上限（默认 1500；0 = 不显示） |
+
+过滤后为空会自动回退为不过滤（stderr 告警），不会给你一个空列表。
+
+### fetch 相关
+
+| flag | 作用 |
+| --- | --- |
+| `--max-chars N` | 单篇正文上限，默认 10000；超出追加 `[…已截断，原文 N 字符…]` |
+| `--keywords "a,b"` | 段落级关键词摘录（保留命中段 + 前后各 `--keyword-pad` 段，默认 1） |
+| `--delay 0.2` | 多 URL 之间的请求间隔（Fetch 有账号 25 QPS + 域名级 QPS 限制） |
+| `--fail-fast` | 任一 URL 失败立即退出（默认继续，最后 exit 3） |
+| `--no-cache` / `--cache-ttl SECONDS` / `--cache-dir DIR` | 缓存控制：默认按 url 缓存 1 天，`0` 表示永不过期 |
+
+### 输出模式
+
+- 默认：面向模型的精简文本（标题 / URL / 来源·日期·score·authority / Summary），不含 `site_icon` 等噪音。
+- `--json`：处理后的结构化 JSON（含 `stats` 或 `failures`）。
+- `--raw`：接口原始响应。
+- `--dry-run`：只打印将要发送的 endpoint + payload，不发请求。
+
+## 退出码
+
+| code | 含义 |
+| --- | --- |
+| 0 | 成功 |
+| 1 | 参数 / 用法 / 密钥配置错误 |
+| 2 | 接口或网络错误（401/402/403/404/429/5xx/超时） |
+| 3 | 部分 URL 失败（`fetch` 多 URL 场景，其余结果可用） |
 
 ## 密钥
 
-脚本固定读取上级目录的 `DeepSeek_API_Key` 文件；文件缺失时报错「没有密钥配置」。不要把密钥明文输出到对话中。
+优先级：`--key-file` > 环境变量 `DEEPSEEK_API_KEY` > skill 根目录 `DeepSeek_API_Key`。
+文件缺失时报「没有密钥配置」。**不要把密钥明文输出到对话或提交进 git。**
+建议 `chmod 600 DeepSeek_API_Key`；仓库内的 `DeepSeek_API_Key_copy` 只是占位示例。
 
 ## 安装
 
-把整个目录复制到 skills 目录即可：
+把整个目录复制到 skills 目录即可；脚本按相对位置查找 `DeepSeek_API_Key`（`scripts/` 的上一级）。
 
-复制后确认 `DeepSeek_API_Key` 在 skill 根目录、`scripts/` 在其下，脚本按此相对关系读取密钥。
+## 自测
+
+```bash
+python3 scripts/selftest.py     # 26 个离线用例：去重/过滤/排序/截断/摘录/缓存/重试
+```
 
 ## 说明
 
-- Search 与 Fetch 均为只读请求；408/429/5xx 自动重试，402 提示充值。
+- Search 与 Fetch 均为只读请求；408/429/5xx 自动退避重试（遵守 `Retry-After`）。
 - `rerank_score ≥ 1.5` 为优质结果，`authority ≥ 3` 为极权威来源。
-- 完整请求字段、响应字段、搜索语法与错误码见 `deepseek-api-reference.md`。
+- 计费按「成功请求次数」（Search / Fetch 各 5 元 / 1000 次），与 `count` 无关：一次多拿结果更省钱。
+- 完整字段、语法、错误码、QPS 见 `deepseek-api-reference.md`。
