@@ -11,7 +11,6 @@
 │   ├── deepseek_search.py      # 主体实现（Python 3 标准库，无第三方依赖）
 │   ├── deepseek-search.sh      # 兼容包装器（旧调用方式仍可用）
 │   └── selftest.py             # 离线自测（不访问网络）
-├── deepseek-api-reference.md   # 完整 API 速查（字段/语法/错误码/QPS/计费）
 ├── DeepSeek_API_Key            # API 密钥（本地文件，已被 .gitignore 忽略）
 └── README.md                   # 本文件
 ```
@@ -116,4 +115,4 @@ python3 scripts/selftest.py     # 26 个离线用例：去重/过滤/排序/截�
 - Search 与 Fetch 均为只读请求；408/429/5xx 自动退避重试（遵守 `Retry-After`）。
 - `rerank_score ≥ 1.5` 为优质结果，`authority ≥ 3` 为极权威来源。
 - 计费按「成功请求次数」（Search / Fetch 各 5 元 / 1000 次），与 `count` 无关：一次多拿结果更省钱。
-- 完整字段、语法、错误码、QPS 见 `deepseek-api-reference.md`。
+- 字段/语法/错误码/QPS 以[官方文档](https://api-docs.deepseek.com/zh-cn/guides/search)为准（代码里不做静态副本，避免过期）。

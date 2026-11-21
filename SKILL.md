@@ -77,6 +77,9 @@ bash scripts/deepseek-search.sh fetch "<URL1>" "<URL2>" --max-chars 8000 --keywo
 - 同一 URL 不要重复 fetch（缓存默认 1 天；`--cache-ttl 0` 表示永不过期）。
 - `--json` / `--raw` 只给程序化处理用，不要为了「看看结构」而多调用；`--dry-run` 可离线检查将要发送的请求。
 
-## 细节文档
+## 需要原始细节时
 
-请求/响应字段、搜索语法表、错误码、QPS、计费细则：`deepseek-api-reference.md`（需要时再读）。
+字段/语法/错误码/QPS/计费以官方文档为准（本文与 `--help` 已覆盖日常所需，不必每次去查）：
+- 指南：https://api-docs.deepseek.com/zh-cn/guides/search
+- Search：https://api-docs.deepseek.com/zh-cn/api/search
+- Fetch：https://api-docs.deepseek.com/zh-cn/api/fetch
